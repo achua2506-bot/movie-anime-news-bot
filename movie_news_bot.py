@@ -838,7 +838,7 @@ def announcement_caption(
         f"available on OTT from "
         f"<b>{release_date.strftime('%d %B %Y')}</b>."
 )
-    def now_caption(
+def now_caption(
     title,
     platform
 ):
