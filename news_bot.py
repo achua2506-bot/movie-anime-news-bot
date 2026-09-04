@@ -1086,4 +1086,5 @@ def main():
                 article,
                 posted
             ):
+                continue
            
