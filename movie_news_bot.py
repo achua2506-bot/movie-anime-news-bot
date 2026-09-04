@@ -1,550 +1,856 @@
-import os, json, re, html, urllib.request, urllib.parse
+import os
+import re
+import json
+import html
+import hashlib
+import urllib.request
+import urllib.parse
 import xml.etree.ElementTree as ET
-from datetime import datetime, date
-from zoneinfo import ZoneInfo
-from difflib import SequenceMatcher
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-CHANNEL = os.environ["MOVIE_CHANNEL"]
+from datetime import datetime, timezone, timedelta
+from difflib import SequenceMatcher
+from email.utils import parsedate_to_datetime
+from html.parser import HTMLParser
+
+
+# ============================================================
+# CONFIG
+# ============================================================
+
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+CHANNEL = os.environ.get("MOVIE_CHANNEL", "").strip()
+
+FEEDS = [
+    (
+        "Malayalam",
+        "https://malayalam.oneindia.com/rss/feeds/malayalam-cinema-fb.xml",
+    ),
+    (
+        "Malayalam",
+        "https://malayalam.oneindia.com/rss/feeds/malayalam-movie-news-fb.xml",
+    ),
+    (
+        "Tamil",
+        "https://tamil.oneindia.com/rss/feeds/tamil-cinema-fb.xml",
+    ),
+    (
+        "Tamil",
+        "https://tamil.oneindia.com/rss/feeds/tamil-ott-fb.xml",
+    ),
+]
+
 STATE_FILE = "movie_posted.json"
 
-IST = ZoneInfo("Asia/Kolkata")
+MAX_ITEMS_PER_FEED = 20
+MAX_CANDIDATES_TO_FETCH = 12
+MAX_POSTS_PER_RUN = 3
 
-MAX_NEW_POSTS = 3
-MAX_RELEASE_POSTS = 3
+REQUEST_TIMEOUT = 15
+LOOKBACK_DAYS = 14
+
+SIMILARITY_THRESHOLD = 0.88
+
 
 # ============================================================
-# RSS FEEDS
-# Malayalam + Tamil cinema/OTT
+# MONTHS
 # ============================================================
 
-RSS_FEEDS = [
-    "https://malayalam.oneindia.com/rss/feeds/malayalam-cinema-fb.xml",
-    "https://malayalam.oneindia.com/rss/feeds/malayalam-movie-news-fb.xml",
-    "https://tamil.oneindia.com/rss/feeds/tamil-cinema-fb.xml",
-    "https://tamil.oneindia.com/rss/feeds/tamil-ott-fb.xml",
-]
+MONTHS = {
+    "january": 1,
+    "jan": 1,
+    "february": 2,
+    "feb": 2,
+    "march": 3,
+    "mar": 3,
+    "april": 4,
+    "apr": 4,
+    "may": 5,
+    "june": 6,
+    "jun": 6,
+    "july": 7,
+    "jul": 7,
+    "august": 8,
+    "aug": 8,
+    "september": 9,
+    "sep": 9,
+    "sept": 9,
+    "october": 10,
+    "oct": 10,
+    "november": 11,
+    "nov": 11,
+    "december": 12,
+    "dec": 12,
+}
+
 
 # ============================================================
 # OTT PLATFORMS
 # ============================================================
 
-PLATFORMS = {
-    "amazon prime video": "Prime Video",
-    "prime video": "Prime Video",
-    "netflix": "Netflix",
-    "jiohotstar": "JioHotstar",
-    "hotstar": "JioHotstar",
-    "disney+ hotstar": "JioHotstar",
-    "sonyliv": "SonyLIV",
-    "sony liv": "SonyLIV",
-    "zee5": "ZEE5",
-    "aha": "Aha",
-    "sunnxt": "Sun NXT",
-    "sun nxt": "Sun NXT",
-    "manorama max": "ManoramaMAX",
-    "manoramamax": "ManoramaMAX",
-    "saina play": "Saina Play",
-    "tentkotta": "Tentkotta",
-}
+PLATFORMS = [
+    ("JioHotstar", ["jiohotstar", "jio hotstar", "hotstar"]),
+    ("Netflix", ["netflix"]),
+    ("Prime Video", ["prime video", "amazon prime", "primevideo"]),
+    ("SonyLIV", ["sonyliv", "sony liv"]),
+    ("ZEE5", ["zee5", "zee 5"]),
+    ("Sun NXT", ["sun nxt", "sunnxt"]),
+    ("ManoramaMAX", ["manorama max", "manoramamax"]),
+    ("aha", ["aha"]),
+    ("ETV Win", ["etv win", "etvwin"]),
+    ("Saina Play", ["saina play", "sainaplay"]),
+    ("Simply South", ["simply south"]),
+    ("Tentkotta", ["tentkotta"]),
+    ("Disney+", ["disney+"]),
+    ("Apple TV+", ["apple tv+"]),
+]
 
-OTT_TERMS = [
+
+# ============================================================
+# FILTERS
+# ============================================================
+
+OTT_WORDS = [
     "ott",
     "streaming",
     "stream",
-    "digital release",
     "digital premiere",
-    "digital rights",
-    "streaming rights",
-    "ott rights",
+    "digital release",
+    "digital debut",
     "online release",
-    "online streaming",
-    "now streaming",
-    "now available",
-    "available to stream",
+    "watch online",
+    "where to watch",
+    "available on",
     "premiere on",
-
-    # Malayalam
-    "ഒടിടി",
-    "ഓടിടി",
-    "സ്ട്രീമിംഗ്",
-    "ഡിജിറ്റൽ റിലീസ്",
-    "ഡിജിറ്റൽ",
-    "ഒടിടി റിലീസ്",
-
-    # Tamil
-    "ஓடிடி",
-    "ஒடிடி",
-    "ஸ்ட்ரீமிங்",
-    "டிஜிட்டல் ரிலீஸ்",
-    "டிஜிட்டல்",
-    "ஓடிடி ரிலீஸ்",
+    "streaming on",
+    "released on ott",
 ]
 
-BAD_TITLE_TERMS = [
-    "birthday",
-    "photoshoot",
-    "fashion",
-    "interview",
-    "viral",
-    "instagram",
-    "box office",
-    "collection",
-    "first look",
-    "teaser",
-    "trailer",
-    "song",
-    "poster",
-    "making video",
-    "behind the scenes",
+
+BAD_PATTERNS = [
+    r"\b(actor|actress|hero|heroine)\b.*\b(interview|birthday|look|photo|pics|talks|says)\b",
+    r"\b(interview|birthday|photoshoot|first look|glamour|viral photo)\b",
+    r"\b(box office|collection|collections|gross|crore|hit|flop)\b",
+    r"\b(trailer|teaser|song|lyric video|first single)\b",
+    r"\b(review|rating|ratings|verdict)\b",
+    r"\b(cast|star cast|actor cast|voice)\b",
 ]
 
-MONTHS = {
-    "january": 1, "jan": 1,
-    "february": 2, "feb": 2,
-    "march": 3, "mar": 3,
-    "april": 4, "apr": 4,
-    "may": 5,
-    "june": 6, "jun": 6,
-    "july": 7, "jul": 7,
-    "august": 8, "aug": 8,
-    "september": 9, "sep": 9, "sept": 9,
-    "october": 10, "oct": 10,
-    "november": 11, "nov": 11,
-    "december": 12, "dec": 12,
-}
+
+LISTICLE_PATTERNS = [
+    r"\bott releases? this week\b",
+    r"\bmovies? releasing on ott\b",
+    r"\bmovies? on ott this week\b",
+    r"\bcomplete list\b",
+    r"\bfull list\b",
+    r"\btop \d+\b",
+    r"\b\d+ movies?\b.*\bott\b",
+]
+
+
+ADULT_PATTERNS = [
+    r"\bporn\b",
+    r"\bxxx\b",
+    r"\badult content\b",
+    r"\bexplicit sexual\b",
+]
+
+
+POSITIVE_PATTERNS = [
+    r"\bott\b.*\b(release|released|release date|premiere|stream|streaming|available|debut)\b",
+    r"\b(release|released|release date|premiere|stream|streaming|available|debut)\b.*\bott\b",
+    r"\b(ott|digital)\b.*\b(date|confirmed|announcement|announced|locked|official)\b",
+    r"\b(streaming|available)\b.*\b(on|from)\b",
+]
+
+
+NOW_PATTERNS = [
+    r"\bnow streaming\b",
+    r"\bnow available\b",
+    r"\bavailable now\b",
+    r"\bstarted streaming\b",
+    r"\bstarts streaming today\b",
+    r"\bstreaming today\b",
+    r"\breleased today\b",
+    r"\bott release today\b",
+    r"\bavailable from today\b",
+]
 
 
 # ============================================================
-# TEXT
+# BASIC HELPERS
 # ============================================================
 
-def clean(text):
-    if not text:
+def clean_text(value):
+    if not value:
         return ""
 
-    text = html.unescape(text)
+    value = html.unescape(value)
+    value = re.sub(r"<[^>]+>", " ", value)
+    value = re.sub(r"\s+", " ", value)
 
-    text = re.sub(
-        r"<script.*?</script>|<style.*?</style>",
-        " ",
-        text,
-        flags=re.I | re.S
-    )
-
-    text = re.sub(r"<[^>]+>", " ", text)
-
-    return re.sub(r"\s+", " ", text).strip()
+    return value.strip()
 
 
-def norm(text):
-    return clean(text).lower()
+def norm(value):
+    value = html.unescape(value or "").lower()
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    value = re.sub(r"\s+", " ", value)
+
+    return value.strip()
 
 
-def similar(a, b):
-    return SequenceMatcher(
-        None,
-        norm(a),
-        norm(b)
-    ).ratio()
+def title_key(value):
+    value = norm(value)
+
+    stop_words = {
+        "ott",
+        "release",
+        "date",
+        "confirmed",
+        "official",
+        "streaming",
+        "movie",
+        "film",
+        "on",
+        "from",
+        "the",
+    }
+
+    words = [
+        word
+        for word in value.split()
+        if word not in stop_words
+    ]
+
+    return " ".join(words)
 
 
-def escape_html(text):
-    return html.escape(
-        clean(text),
-        quote=False
-    )
+def similarity(a, b):
+    a = norm(a)
+    b = norm(b)
+
+    if not a or not b:
+        return 0.0
+
+    return SequenceMatcher(None, a, b).ratio()
 
 
 # ============================================================
-# MEMORY
+# HTTP
 # ============================================================
 
-def load_state():
+def request(url):
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 "
+                "(compatible; OTTNewsBot/1.0)"
+            )
+        },
+    )
+
+    with urllib.request.urlopen(
+        req,
+        timeout=REQUEST_TIMEOUT
+    ) as response:
+
+        return response.read()
+
+
+# ============================================================
+# HTML PARSER
+# ============================================================
+
+class MetaParser(HTMLParser):
+
+    def __init__(self):
+        super().__init__(
+            convert_charrefs=True
+        )
+
+        self.meta = {}
+        self.title_parts = []
+
+        self.in_title = False
+        self.in_body = False
+
+        self.body_parts = []
+
+    def handle_starttag(self, tag, attrs):
+
+        attrs = dict(attrs)
+
+        tag = tag.lower()
+
+        if tag == "meta":
+
+            key = (
+                attrs.get("property")
+                or attrs.get("name")
+            )
+
+            content = attrs.get("content")
+
+            if key and content:
+                self.meta[
+                    key.lower()
+                ] = content.strip()
+
+        elif tag == "title":
+
+            self.in_title = True
+
+        elif tag == "body":
+
+            self.in_body = True
+
+    def handle_endtag(self, tag):
+
+        tag = tag.lower()
+
+        if tag == "title":
+
+            self.in_title = False
+
+        elif tag == "body":
+
+            self.in_body = False
+
+    def handle_data(self, data):
+
+        if self.in_title:
+            self.title_parts.append(data)
+
+        if self.in_body:
+            self.body_parts.append(data)
+
+
+# ============================================================
+# ARTICLE PAGE DATA
+# ============================================================
+
+def fetch_page_data(url):
+
     try:
-        with open(
-            STATE_FILE,
-            encoding="utf-8"
-        ) as f:
-            data = json.load(f)
 
-        if isinstance(data, dict):
-            posted = data.get("posted", [])
-            announcements = data.get("announcements", {})
+        raw = request(url)
 
-            if not isinstance(posted, list):
-                posted = []
+        text = raw.decode(
+            "utf-8",
+            errors="ignore"
+        )
 
-            if not isinstance(announcements, dict):
-                announcements = {}
+        parser = MetaParser()
 
-            return {
-                "posted": posted,
-                "announcements": announcements
-            }
+        parser.feed(text)
+
+        meta = parser.meta
+
+        title = clean_text(
+            " ".join(
+                parser.title_parts
+            )
+        )
+
+        body = clean_text(
+            " ".join(
+                parser.body_parts
+            )
+        )
+
+        english_summary = ""
+
+        # OneIndia pages can contain
+        # an English summary.
+        match = re.search(
+            r"English summary\s*(.*?)(?:"
+            r"\s+(?:Read Full Story|Tags|Related|Comments)"
+            r"|$)",
+            body,
+            re.I,
+        )
+
+        if match:
+
+            english_summary = clean_text(
+                match.group(1)
+            )
+
+        image = (
+            meta.get("og:image")
+            or meta.get("twitter:image")
+            or meta.get("twitter:image:src")
+            or ""
+        )
+
+        return {
+            "title": title,
+            "description": clean_text(
+                meta.get("description")
+                or meta.get("og:description")
+                or ""
+            ),
+            "english": english_summary,
+            "image": image,
+            "body": body,
+        }
+
+    except Exception as error:
+
+        print(
+            "Page fetch error:",
+            error
+        )
+
+        return {
+            "title": "",
+            "description": "",
+            "english": "",
+            "image": "",
+            "body": "",
+        }
+
+
+# ============================================================
+# RSS HELPERS
+# ============================================================
+
+def child_text(parent, names):
+
+    for child in list(parent):
+
+        tag = child.tag.rsplit(
+            "}",
+            1
+        )[-1].lower()
+
+        if tag in names:
+
+            return clean_text(
+                child.text or ""
+            )
+
+    return ""
+
+
+def child_attr(
+    parent,
+    names,
+    attr
+):
+
+    for child in list(parent):
+
+        tag = child.tag.rsplit(
+            "}",
+            1
+        )[-1].lower()
+
+        if tag in names:
+
+            value = child.attrib.get(
+                attr
+            )
+
+            if value:
+                return value.strip()
+
+    return ""
+
+
+# ============================================================
+# DATE PARSING
+# ============================================================
+
+def parse_date(value):
+
+    if not value:
+        return None
+
+    try:
+
+        dt = parsedate_to_datetime(
+            value
+        )
+
+        if dt.tzinfo is None:
+            dt = dt.replace(
+                tzinfo=timezone.utc
+            )
+
+        return dt.astimezone(
+            timezone.utc
+        )
 
     except Exception:
         pass
 
-    return {
-        "posted": [],
-        "announcements": {}
-    }
+    formats = [
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d",
+    ]
 
+    for fmt in formats:
 
-def save_state(state):
-    with open(
-        STATE_FILE,
-        "w",
-        encoding="utf-8"
-    ) as f:
-        json.dump(
-            state,
-            f,
-            ensure_ascii=False,
-            indent=2
-        )
+        try:
 
-
-# ============================================================
-# RSS
-# ============================================================
-
-def fetch_feed(url):
-    try:
-        request = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent":
-                    "Mozilla/5.0 MovieOTTNewsBot/1.0"
-            }
-        )
-
-        with urllib.request.urlopen(
-            request,
-            timeout=20
-        ) as response:
-            return response.read()
-
-    except Exception as e:
-        print("Feed failed:", url, e)
-        return None
-
-
-def local_name(tag):
-    return tag.rsplit(
-        "}",
-        1
-    )[-1].lower()
-
-
-def child_text(item, names):
-    for child in list(item):
-        if local_name(child.tag) in names:
-            return clean(
-                " ".join(child.itertext())
+            dt = datetime.strptime(
+                value.strip(),
+                fmt
             )
 
-    return ""
+            if dt.tzinfo is None:
 
+                dt = dt.replace(
+                    tzinfo=timezone.utc
+                )
 
-def get_link(item):
-    for child in list(item):
+            return dt.astimezone(
+                timezone.utc
+            )
 
-        if local_name(child.tag) != "link":
+        except Exception:
             continue
 
-        href = child.attrib.get(
-            "href",
-            ""
-        ).strip()
-
-        if href:
-            return html.unescape(href)
-
-        text = clean(
-            "".join(child.itertext())
-        )
-
-        if text:
-            return text
-
-    return ""
+    return None
 
 
-def get_image_from_rss(item):
-    for child in item.iter():
+# ============================================================
+# RSS FEED PARSER
+# ============================================================
 
-        tag = local_name(child.tag)
-
-        if tag not in {
-            "enclosure",
-            "content",
-            "thumbnail"
-        }:
-            continue
-
-        url = (
-            child.attrib.get("url")
-            or child.attrib.get("href")
-        )
-
-        if not url:
-            continue
-
-        file_type = child.attrib.get(
-            "type",
-            ""
-        )
-
-        if (
-            tag != "enclosure"
-            or file_type.startswith("image/")
-            or not file_type
-        ):
-            return html.unescape(url)
-
-    return ""
-
-
-def parse_feed(data):
-    results = []
+def parse_feed(
+    url,
+    language
+):
 
     try:
-        root = ET.fromstring(data)
 
-    except Exception as e:
-        print("XML error:", e)
-        return results
+        root = ET.fromstring(
+            request(url)
+        )
 
-    for item in root.iter():
+    except Exception as error:
 
-        if local_name(item.tag) not in {
+        print(
+            "Feed error:",
+            url,
+            error
+        )
+
+        return []
+
+    items = []
+
+    for node in root.iter():
+
+        tag = node.tag.rsplit(
+            "}",
+            1
+        )[-1].lower()
+
+        if tag not in (
             "item",
-            "entry"
-        }:
+            "entry",
+        ):
             continue
 
         title = child_text(
-            item,
+            node,
             {"title"}
         )
 
-        link = get_link(item)
+        link = child_text(
+            node,
+            {"link"}
+        )
+
+        if not link:
+
+            link = child_attr(
+                node,
+                {"link"},
+                "href"
+            )
 
         description = child_text(
-            item,
+            node,
             {
                 "description",
                 "summary",
                 "content",
-                "encoded"
             }
         )
 
-        if not title or not link:
-            continue
-
-        results.append({
-            "title": title,
-            "description": description,
-            "url": link,
-            "image": get_image_from_rss(item)
-        })
-
-    return results
-
-
-# ============================================================
-# ARTICLE IMAGE
-# ============================================================
-
-def get_article_image(url):
-    try:
-        request = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent":
-                    "Mozilla/5.0 MovieOTTNewsBot/1.0"
+        pub = child_text(
+            node,
+            {
+                "pubdate",
+                "published",
+                "updated",
+                "date",
             }
         )
 
-        with urllib.request.urlopen(
-            request,
-            timeout=15
-        ) as response:
+        image = ""
 
-            text = response.read(
-                300000
-            ).decode(
-                "utf-8",
-                errors="ignore"
-            )
+        for child in list(node):
 
-        patterns = [
-            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
-            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image',
-            r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)',
-        ]
+            child_tag = child.tag.rsplit(
+                "}",
+                1
+            )[-1].lower()
 
-        for pattern in patterns:
+            if child_tag in (
+                "enclosure",
+                "content",
+                "thumbnail",
+            ):
 
-            match = re.search(
-                pattern,
-                text,
-                flags=re.I
-            )
+                content_type = (
+                    child.attrib.get(
+                        "type"
+                    )
+                    or ""
+                ).lower()
 
-            if match:
-                image = html.unescape(
-                    match.group(1)
+                image_url = (
+                    child.attrib.get(
+                        "url"
+                    )
+                    or child.attrib.get(
+                        "href"
+                    )
+                    or ""
                 )
 
-                if image.startswith("//"):
-                    image = "https:" + image
+                if image_url and (
+                    "image" in content_type
+                    or child_tag != "content"
+                ):
 
-                return image
+                    image = image_url
+                    break
 
-    except Exception as e:
-        print("Image error:", e)
+        if title and link:
 
-    return ""
+            items.append(
+                {
+                    "title": title,
+                    "url": link,
+                    "description": clean_text(
+                        description
+                    ),
+                    "published": parse_date(
+                        pub
+                    ),
+                    "image": image,
+                    "language": language,
+                }
+            )
+
+        if len(items) >= MAX_ITEMS_PER_FEED:
+            break
+
+    return items
 
 
 # ============================================================
-# OTT DETECTION
+# TEXT COMBINATION
+# ============================================================
+
+def combined_text(
+    item,
+    page=None
+):
+
+    parts = [
+        item.get(
+            "title",
+            ""
+        ),
+        item.get(
+            "description",
+            ""
+        ),
+    ]
+
+    if page:
+
+        parts.extend(
+            [
+                page.get(
+                    "title",
+                    ""
+                ),
+                page.get(
+                    "description",
+                    ""
+                ),
+                page.get(
+                    "english",
+                    ""
+                ),
+            ]
+        )
+
+    return clean_text(
+        " ".join(parts)
+    )
+
+
+# ============================================================
+# STORY FILTER
+# ============================================================
+
+def is_candidate(
+    item,
+    page=None
+):
+
+    text = combined_text(
+        item,
+        page
+    ).lower()
+
+    # Remove unwanted adult content.
+    if any(
+        re.search(
+            pattern,
+            text,
+            re.I
+        )
+        for pattern in ADULT_PATTERNS
+    ):
+        return False
+
+    # Reject listicles.
+    if any(
+        re.search(
+            pattern,
+            text,
+            re.I
+        )
+        for pattern in LISTICLE_PATTERNS
+    ):
+        return False
+
+    # Reject irrelevant movie news.
+    if any(
+        re.search(
+            pattern,
+            text,
+            re.I
+        )
+        for pattern in BAD_PATTERNS
+    ):
+        return False
+
+    positive = any(
+        re.search(
+            pattern,
+            text,
+            re.I
+        )
+        for pattern in POSITIVE_PATTERNS
+    )
+
+    has_ott_word = any(
+        word in text
+        for word in OTT_WORDS
+    )
+
+    return positive or has_ott_word
+
+
+# ============================================================
+# PLATFORM DETECTION
 # ============================================================
 
 def find_platform(text):
-    text = norm(text)
 
-    for keyword, platform in sorted(
-        PLATFORMS.items(),
-        key=lambda x: len(x[0]),
-        reverse=True
-    ):
-        if keyword in text:
-            return platform
+    low = text.lower()
+
+    for display, variants in PLATFORMS:
+
+        for variant in variants:
+
+            pattern = (
+                r"(?<![a-z0-9])"
+                + re.escape(variant)
+                + r"(?![a-z0-9])"
+            )
+
+            if re.search(
+                pattern,
+                low
+            ):
+
+                return display
 
     return ""
 
 
-def has_ott(text):
-    text = norm(text)
+# ============================================================
+# ORDINAL CLEANUP
+# ============================================================
 
-    return any(
-        keyword in text
-        for keyword in OTT_TERMS
-    )
+def strip_ordinal(value):
 
-
-def bad_title(title):
-    title = norm(title)
-
-    return (
-        sum(
-            term in title
-            for term in BAD_TITLE_TERMS
-        ) >= 2
+    return re.sub(
+        r"(\d{1,2})(st|nd|rd|th)",
+        r"\1",
+        value,
+        flags=re.I,
     )
 
 
 # ============================================================
-# IMPORTANT:
-# Only search for a release date near OTT-related words.
-#
-# This reduces the chance of accidentally taking
-# an unrelated date from an article.
+# RELEASE DATE
 # ============================================================
 
-def release_context(text):
-    raw = clean(text)
-    low = raw.lower()
+def parse_release_date(
+    text,
+    published
+):
 
-    pattern = (
-        r"ott|streaming|digital release|digital premiere|"
-        r"digital rights|streaming rights|ott rights|"
-        r"available to stream|now streaming|premiere on|"
-        r"netflix|prime video|jiohotstar|hotstar|"
-        r"sonyliv|zee5|aha|sunnxt|sun nxt|"
-        r"manorama max|manoramamax|saina play|tentkotta|"
-        r"ഒടിടി|ഓടിടി|സ്ട്രീമിംഗ്|ഡിജിറ്റൽ|"
-        r"ஓடிடி|ஒடிடி|ஸ்ட்ரீமிங்|டிஜிட்டல்"
+    text = strip_ordinal(
+        text
     )
 
-    anchors = list(
-        re.finditer(
-            pattern,
-            low,
-            flags=re.I
-        )
-    )
-
-    windows = []
-
-    for anchor in anchors:
-
-        start = max(
-            0,
-            anchor.start() - 220
-        )
-
-        end = min(
-            len(raw),
-            anchor.end() + 300
-        )
-
-        windows.append(
-            raw[start:end]
-        )
-
-    return " ".join(windows)
-
-
-# ============================================================
-# DATE DETECTION
-# ============================================================
-
-def parse_release_date(text, today):
-    text = clean(text)
-
-    month_pattern = "|".join(
-        sorted(
-            MONTHS,
-            key=len,
-            reverse=True
-        )
-    )
+    # --------------------------------------------------------
+    # Explicit year
+    # --------------------------------------------------------
 
     patterns = [
 
-        # 20 May 2026
-        # 20 May
-        rf"\b(\d{{1,2}})"
-        rf"(?:st|nd|rd|th)?"
-        rf"\s+({month_pattern})"
-        rf"(?:\s*,?\s*(20\d{{2}}))?\b",
+        r"\b"
+        r"(\d{1,2})\s+"
+        r"(January|February|March|April|May|June|July|August|September|October|November|December)"
+        r"\s+(20\d{2})"
+        r"\b",
 
-        # May 20 2026
-        # May 20
-        rf"\b({month_pattern})"
-        rf"\s+(\d{{1,2}})"
-        rf"(?:st|nd|rd|th)?"
-        rf"(?:\s*,?\s*(20\d{{2}}))?\b",
+        r"\b"
+        r"(January|February|March|April|May|June|July|August|September|October|November|December)"
+        r"\s+(\d{1,2}),?\s+"
+        r"(20\d{2})"
+        r"\b",
 
-        # 2026-05-20
-        r"\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b",
-
-        # 20-05-2026
-        r"\b(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2})\b",
+        r"\b"
+        r"(\d{1,2})[/-]"
+        r"(\d{1,2})[/-]"
+        r"(20\d{2})"
+        r"\b",
     ]
 
-    for index, pattern in enumerate(patterns):
+    for pattern in patterns:
 
         match = re.search(
             pattern,
             text,
-            flags=re.I
+            re.I
         )
 
         if not match:
@@ -552,87 +858,136 @@ def parse_release_date(text, today):
 
         try:
 
-            if index == 0:
+            if match.group(
+                2
+            ).lower() in MONTHS:
 
-                day, month, year = match.groups()
-
-                year = (
-                    int(year)
-                    if year
-                    else today.year
+                day = int(
+                    match.group(1)
                 )
 
-                result = date(
-                    year,
-                    MONTHS[month.lower()],
-                    int(day)
+                month = MONTHS[
+                    match.group(2).lower()
+                ]
+
+                year = int(
+                    match.group(3)
                 )
 
-                if (
-                    not match.group(3)
-                    and result < today
-                ):
-                    result = date(
-                        today.year + 1,
-                        result.month,
-                        result.day
-                    )
+            elif match.group(
+                1
+            ).lower() in MONTHS:
 
-            elif index == 1:
+                month = MONTHS[
+                    match.group(1).lower()
+                ]
 
-                month, day, year = match.groups()
-
-                year = (
-                    int(year)
-                    if year
-                    else today.year
+                day = int(
+                    match.group(2)
                 )
 
-                result = date(
-                    year,
-                    MONTHS[month.lower()],
-                    int(day)
-                )
-
-                if (
-                    not match.group(3)
-                    and result < today
-                ):
-                    result = date(
-                        today.year + 1,
-                        result.month,
-                        result.day
-                    )
-
-            elif index == 2:
-
-                year, month, day = map(
-                    int,
-                    match.groups()
-                )
-
-                result = date(
-                    year,
-                    month,
-                    day
+                year = int(
+                    match.group(3)
                 )
 
             else:
 
-                day, month, year = map(
-                    int,
-                    match.groups()
+                day = int(
+                    match.group(1)
                 )
 
-                result = date(
-                    year,
-                    month,
-                    day
+                month = int(
+                    match.group(2)
                 )
 
-            return result
+                year = int(
+                    match.group(3)
+                )
 
-        except ValueError:
+            return datetime(
+                year,
+                month,
+                day
+            ).date()
+
+        except Exception:
+            continue
+
+    # --------------------------------------------------------
+    # NO YEAR
+    #
+    # IMPORTANT:
+    # Use the article publication year.
+    # NOT the current year.
+    # --------------------------------------------------------
+
+    no_year_patterns = [
+
+        r"\b"
+        r"(\d{1,2})\s+"
+        r"(January|February|March|April|May|June|July|August|September|October|November|December)"
+        r"\b",
+
+        r"\b"
+        r"(January|February|March|April|May|June|July|August|September|October|November|December)"
+        r"\s+(\d{1,2})"
+        r"\b",
+    ]
+
+    if published:
+
+        base_year = published.year
+
+    else:
+
+        base_year = datetime.now(
+            timezone.utc
+        ).year
+
+    for pattern in no_year_patterns:
+
+        match = re.search(
+            pattern,
+            text,
+            re.I
+        )
+
+        if not match:
+            continue
+
+        try:
+
+            if match.group(
+                2
+            ).lower() in MONTHS:
+
+                day = int(
+                    match.group(1)
+                )
+
+                month = MONTHS[
+                    match.group(2).lower()
+                ]
+
+            else:
+
+                month = MONTHS[
+                    match.group(1).lower()
+                ]
+
+                day = int(
+                    match.group(2)
+                )
+
+            # IMPORTANT:
+            # Keep article year.
+            return datetime(
+                base_year,
+                month,
+                day
+            ).date()
+
+        except Exception:
             continue
 
     return None
@@ -642,217 +997,494 @@ def parse_release_date(text, today):
 # STORY STATUS
 # ============================================================
 
-def story_status(text):
-    text = norm(text)
+def story_status(
+    text,
+    release_date,
+    today
+):
 
-    now_terms = [
-        "now streaming",
-        "now available",
-        "streaming now",
-        "available to stream",
-        "released on ott",
-        "ott release today",
-    ]
+    low = text.lower()
 
     if any(
-        term in text
-        for term in now_terms
+        re.search(
+            pattern,
+            low,
+            re.I
+        )
+        for pattern in NOW_PATTERNS
     ):
         return "now"
 
-    announcement_terms = [
-        "will stream",
-        "streaming on",
-        "streaming from",
-        "releasing on",
-        "release date",
-        "ott release",
-        "digital release",
-        "premiere on",
-        "available from",
+    if (
+        release_date
+        and release_date <= today
+        and re.search(
+            r"\b(ott|streaming|available|released|premiere)\b",
+            low,
+            re.I,
+        )
+    ):
+
+        old_announcement_words = [
+            "announced",
+            "confirmed",
+            "expected",
+            "set to",
+            "will be",
+        ]
+
+        if not any(
+            word in low
+            for word in old_announcement_words
+        ):
+            return "now"
+
+    return "announced"
+
+
+# ============================================================
+# MOVIE TITLE EXTRACTION
+# ============================================================
+
+def extract_movie_title(
+    item,
+    page
+):
+
+    sources = [
+        page.get(
+            "english",
+            ""
+        ),
+        page.get(
+            "description",
+            ""
+        ),
+        page.get(
+            "title",
+            ""
+        ),
+        item.get(
+            "title",
+            ""
+        ),
     ]
 
-    if any(
-        term in text
-        for term in announcement_terms
-    ):
-        return "announced"
+    combined = " ".join(
+        source
+        for source in sources
+        if source
+    )
+
+    patterns = [
+
+        r"(?:the\s+)?"
+        r"(?:Tamil|Malayalam)\s+"
+        r"(?:film|movie)\s+"
+        r"([A-Z][A-Za-z0-9'&:+.\- ]{1,80}?)"
+        r"(?:,|\s+is\s+|\s+will\s+|\s+was\s+|\s+has\s+|\s+on\s+|\s+from\s+)",
+
+        r"(?:movie|film)\s+"
+        r"([A-Z][A-Za-z0-9'&:+.\- ]{1,80}?)"
+        r"(?:\s+(?:OTT|release|is|will|was|has|on|from)\b|,|$)",
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            combined,
+            re.I
+        )
+
+        if not match:
+            continue
+
+        title = clean_text(
+            match.group(1)
+        ).strip(
+            " .:-"
+        )
+
+        if (
+            1 < len(
+                title.split()
+            ) <= 12
+            and not re.search(
+                r"\b(ott|release|confirmed|streaming|date)\b",
+                title,
+                re.I,
+            )
+        ):
+
+            return title
+
+    for source in sources:
+
+        for match in re.finditer(
+            r"['\"]"
+            r"([A-Za-z][A-Za-z0-9'&:+.\- ]{1,80})"
+            r"['\"]",
+            source,
+        ):
+
+            candidate = clean_text(
+                match.group(1)
+            ).strip()
+
+            if (
+                1 < len(
+                    candidate.split()
+                ) <= 10
+                and not re.search(
+                    r"\b(OTT|release|streaming|available|confirmed)\b",
+                    candidate,
+                    re.I,
+                )
+            ):
+
+                return candidate
+
+    try:
+
+        parsed = urllib.parse.urlparse(
+            item["url"]
+        )
+
+        slug = (
+            parsed.path
+            .rstrip("/")
+            .split("/")[-1]
+        )
+
+        slug = re.sub(
+            r"-\d+$",
+            "",
+            slug
+        )
+
+        slug = re.sub(
+            r"-(ott|release|date|confirmed|official|streaming|premiere|from|on)-.*$",
+            "",
+            slug,
+            flags=re.I,
+        )
+
+        words = re.split(
+            r"[-_]+",
+            slug
+        )
+
+        words = [
+            word
+            for word in words
+            if word
+            and not word.isdigit()
+        ]
+
+        if words:
+
+            title = " ".join(
+                word.capitalize()
+                for word in words[:8]
+            )
+
+            if len(title) >= 3:
+                return title
+
+    except Exception:
+        pass
 
     return ""
 
 
 # ============================================================
-# DUPLICATE PROTECTION
+# STATE
 # ============================================================
 
-def already_posted(state, item):
-    for old in state["posted"]:
+def load_state():
 
-        if not isinstance(
-            old,
-            dict
-        ):
-            continue
+    default = {
+        "announcements": {},
+        "posted_urls": [],
+        "posted_now": [],
+    }
 
-        if old.get("url") == item["url"]:
-            return True
+    try:
 
-        if (
-            old.get("title")
-            and similar(
-                old["title"],
-                item["title"]
-            ) >= 0.90
-        ):
-            return True
+        with open(
+            STATE_FILE,
+            "r",
+            encoding="utf-8"
+        ) as file:
 
-    return False
+            data = json.load(
+                file
+            )
+
+        for key, value in default.items():
+
+            data.setdefault(
+                key,
+                value
+            )
+
+        return data
+
+    except Exception:
+
+        return default
+
+
+def save_state(state):
+
+    state["posted_urls"] = (
+        state.get(
+            "posted_urls",
+            []
+        )[-500:]
+    )
+
+    state["posted_now"] = (
+        state.get(
+            "posted_now",
+            []
+        )[-500:]
+    )
+
+    with open(
+        STATE_FILE,
+        "w",
+        encoding="utf-8"
+    ) as file:
+
+        json.dump(
+            state,
+            file,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+
+
+# ============================================================
+# MOVIE KEY
+# ============================================================
+
+def movie_key(title):
+
+    key = title_key(
+        title
+    )
+
+    if key:
+        return key
+
+    return hashlib.sha1(
+        norm(title).encode()
+    ).hexdigest()[:16]
+
+
+def find_existing_announcement(
+    state,
+    title
+):
+
+    key = movie_key(
+        title
+    )
+
+    if key in state[
+        "announcements"
+    ]:
+
+        return (
+            key,
+            state[
+                "announcements"
+            ][key],
+        )
+
+    for existing_key, record in (
+        state[
+            "announcements"
+        ].items()
+    ):
+
+        if similarity(
+            title,
+            record.get(
+                "title",
+                ""
+            )
+        ) >= SIMILARITY_THRESHOLD:
+
+            return (
+                existing_key,
+                record,
+            )
+
+    return (
+        key,
+        None
+    )
 
 
 # ============================================================
 # TELEGRAM
 # ============================================================
 
-def telegram_request(
+def telegram_call(
     method,
-    params
+    payload
 ):
+
     url = (
-        "https://api.telegram.org/"
-        f"bot{BOT_TOKEN}/{method}"
+        f"https://api.telegram.org/"
+        f"bot{BOT_TOKEN}/"
+        f"{method}"
     )
 
     data = urllib.parse.urlencode(
-        params
-    ).encode("utf-8")
+        payload
+    ).encode()
 
-    request = urllib.request.Request(
+    request_obj = urllib.request.Request(
         url,
         data=data,
         headers={
-            "Content-Type":
-                "application/x-www-form-urlencoded"
-        }
+            "User-Agent":
+                "OTTNewsBot/1.0"
+        },
     )
-
-    with urllib.request.urlopen(
-        request,
-        timeout=30
-    ) as response:
-
-        result = json.loads(
-            response.read().decode()
-        )
-
-    if not result.get("ok"):
-        raise RuntimeError(
-            result.get(
-                "description",
-                "Telegram error"
-            )
-        )
-
-    return result
-
-
-# ============================================================
-# POST
-# ============================================================
-
-def send_item(item, caption):
-    image = item.get("image", "")
-
-    if not image and item.get("url"):
-        image = get_article_image(
-            item["url"]
-        )
-
-    if image:
-
-        try:
-
-            telegram_request(
-                "sendPhoto",
-                {
-                    "chat_id": CHANNEL,
-                    "photo": image,
-                    "caption": caption,
-                    "parse_mode": "HTML"
-                }
-            )
-
-            return True
-
-        except Exception as e:
-
-            print(
-                "Photo failed:",
-                e
-            )
 
     try:
 
-        telegram_request(
-            "sendMessage",
-            {
-                "chat_id": CHANNEL,
-                "text": caption,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True
-            }
+        raw = urllib.request.urlopen(
+            request_obj,
+            timeout=REQUEST_TIMEOUT
+        ).read()
+
+        result = json.loads(
+            raw.decode()
         )
 
-        return True
+        if not result.get(
+            "ok"
+        ):
 
-    except Exception as e:
+            print(
+                "Telegram error:",
+                result
+            )
+
+        return result.get(
+            "ok",
+            False
+        )
+
+    except Exception as error:
 
         print(
-            "Telegram message failed:",
-            e
+            "Telegram request error:",
+            error
         )
 
         return False
+
+
+def send_post(
+    caption,
+    image=""
+):
+
+    if image:
+
+        success = telegram_call(
+            "sendPhoto",
+            {
+                "chat_id": CHANNEL,
+                "photo": image,
+                "caption": caption,
+                "parse_mode": "HTML",
+            },
+        )
+
+        if success:
+            return True
+
+    return telegram_call(
+        "sendMessage",
+        {
+            "chat_id": CHANNEL,
+            "text": caption,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": "true",
+        },
+    )
 
 
 # ============================================================
 # CAPTIONS
 # ============================================================
 
+def format_date(date_value):
+
+    return (
+        f"{date_value.day} "
+        f"{date_value.strftime('%B %Y')}"
+    )
+
+
 def announcement_caption(
     title,
     platform,
-    release_date
+    release_date,
+    language
 ):
-    if platform:
 
-        return (
-            "🎬 <b>OTT Release Announced</b>\n\n"
-            f"<b>{escape_html(title)}</b> will be "
-            f"available on <b>{escape_html(platform)}</b> "
-            f"from <b>{release_date.strftime('%d %B %Y')}</b>."
+    language_label = ""
+
+    if language in (
+        "Malayalam",
+        "Tamil",
+    ):
+
+        language_label = (
+            f" ({language})"
         )
 
     return (
         "🎬 <b>OTT Release Announced</b>\n\n"
-        f"<b>{escape_html(title)}</b> will be "
-        f"available on OTT from "
-        f"<b>{release_date.strftime('%d %B %Y')}</b>."
-)
+        f"<b>{html.escape(title)}</b>"
+        f"{language_label} will be available on "
+        f"<b>{html.escape(platform)}</b> "
+        f"from <b>{format_date(release_date)}</b>."
+    )
+
+
 def now_caption(
     title,
-    platform
+    platform,
+    language
 ):
-    if platform:
 
-        return (
-            "🎬 <b>Now Streaming</b>\n\n"
-            f"<b>{escape_html(title)}</b> is now "
-            f"available on <b>{escape_html(platform)}</b>."
+    language_label = ""
+
+    if language in (
+        "Malayalam",
+        "Tamil",
+    ):
+
+        language_label = (
+            f" ({language})"
         )
 
     return (
         "🎬 <b>Now Streaming</b>\n\n"
-        f"<b>{escape_html(title)}</b> is now available on OTT."
+        f"<b>{html.escape(title)}</b>"
+        f"{language_label} is now available on "
+        f"<b>{html.escape(platform)}</b>."
     )
 
 
@@ -862,115 +1494,86 @@ def now_caption(
 
 def main():
 
-    print(
-        "Starting Movie OTT News Bot..."
-    )
+    if not BOT_TOKEN:
 
-    today = datetime.now(
-        IST
-    ).date()
+        raise SystemExit(
+            "Missing BOT_TOKEN secret"
+        )
+
+    if not CHANNEL:
+
+        raise SystemExit(
+            "Missing MOVIE_CHANNEL secret"
+        )
 
     state = load_state()
 
-    release_posts = 0
+    # Make sure the state file exists.
+    save_state(state)
 
-    # --------------------------------------------------------
-    # 1. CHECK SAVED FUTURE RELEASES
-    # --------------------------------------------------------
+    now = datetime.now(
+        timezone.utc
+    )
 
-    for key, record in list(
-        state["announcements"].items()
-    ):
+    today = now.date()
 
-        if not isinstance(
-            record,
-            dict
-        ):
-            continue
-
-        if record.get(
-            "released_posted",
-            False
-        ):
-            continue
-
-        try:
-
-            release_date = date.fromisoformat(
-                record["release_date"]
-            )
-
-        except Exception:
-            continue
-
-        if release_date != today:
-            continue
-
-        if release_posts >= MAX_RELEASE_POSTS:
-            break
-
-        title = record.get(
-            "title",
-            ""
+    cutoff = (
+        now
+        - timedelta(
+            days=LOOKBACK_DAYS
         )
+    )
 
-        platform_name = record.get(
-            "platform",
-            ""
-        )
-
-        item = {
-            "title": title,
-            "url": "",
-            "image": record.get(
-                "image",
-                ""
-            )
-        }
-
-        caption = now_caption(
-            title,
-            platform_name
-        )
-
-        if send_item(
-            item,
-            caption
-        ):
-
-            record[
-                "released_posted"
-            ] = True
-
-            release_posts += 1
-
-    # --------------------------------------------------------
-    # 2. READ ALL RSS FEEDS
-    # --------------------------------------------------------
+    # ========================================================
+    # READ ALL FEEDS
+    # ========================================================
 
     all_items = []
 
-    for feed in RSS_FEEDS:
+    for language, feed in FEEDS:
 
-        print(
-            "Checking:",
-            feed
+        items = parse_feed(
+            feed,
+            language
         )
 
-        data = fetch_feed(
-            feed
-        )
+        for item in items:
 
-        if data:
-            all_items.extend(
-                parse_feed(data)
+            published = item.get(
+                "published"
             )
 
-    # --------------------------------------------------------
-    # 3. REMOVE SAME URL DUPLICATES
-    # --------------------------------------------------------
+            if (
+                published
+                and published < cutoff
+            ):
+                continue
 
-    unique_items = []
+            all_items.append(
+                item
+            )
+
+    all_items.sort(
+        key=lambda item: (
+            item.get(
+                "published"
+            )
+            or datetime.min.replace(
+                tzinfo=timezone.utc
+            ),
+            item.get(
+                "url",
+                ""
+            ),
+        ),
+        reverse=True,
+    )
+
+    # ========================================================
+    # FIND POSSIBLE OTT STORIES
+    # ========================================================
+
+    candidates = []
 
     seen_urls = set()
 
@@ -981,244 +1584,421 @@ def main():
         if url in seen_urls:
             continue
 
-        seen_urls.add(url)
+        if url in state[
+            "posted_urls"
+        ]:
+            continue
 
-        unique_items.append(
-            item
+        seen_urls.add(
+            url
         )
 
-    # --------------------------------------------------------
-    # 4. FILTER OTT STORIES
-    # --------------------------------------------------------
-
-    candidates = []
-
-    for item in unique_items:
-
-        if already_posted(
-            state,
+        text = combined_text(
             item
+        ).lower()
+
+        has_positive = any(
+            re.search(
+                pattern,
+                text,
+                re.I
+            )
+            for pattern in POSITIVE_PATTERNS
+        )
+
+        has_ott = any(
+            word in text
+            for word in OTT_WORDS
+        )
+
+        if not (
+            has_positive
+            or has_ott
         ):
             continue
 
-        full_text = (
-            item["title"]
-            + " "
-            + item["description"]
+        candidates.append(
+            item
         )
 
-        if not has_ott(full_text):
+        if len(candidates) >= (
+            MAX_CANDIDATES_TO_FETCH
+        ):
+            break
+
+    posts = 0
+
+    # ========================================================
+    # PROCESS STORIES
+    # ========================================================
+
+    for item in candidates:
+
+        page = fetch_page_data(
+            item["url"]
+        )
+
+        text = combined_text(
+            item,
+            page
+        )
+
+        if not is_candidate(
+            item,
+            page
+        ):
+
+            state[
+                "posted_urls"
+            ].append(
+                item["url"]
+            )
+
             continue
 
-        if bad_title(item["title"]):
-            continue
-
-        context = release_context(
-            full_text
-        )
-
-        status = (
-            story_status(context)
-            or story_status(full_text)
-        )
-
-        platform_name = (
-            find_platform(context)
-            or find_platform(full_text)
+        platform = find_platform(
+            text
         )
 
         release_date = parse_release_date(
-            context,
+            text,
+            item.get(
+                "published"
+            )
+        )
+
+        title = extract_movie_title(
+            item,
+            page
+        )
+
+        # Don't guess.
+        if not platform or not title:
+
+            print(
+                "Skipping uncertain story:",
+                item["title"]
+            )
+
+            continue
+
+        key, existing = (
+            find_existing_announcement(
+                state,
+                title
+            )
+        )
+
+        status = story_status(
+            text,
+            release_date,
             today
         )
 
-        if status == "now":
+        image = (
+            item.get(
+                "image"
+            )
+            or page.get(
+                "image",
+                ""
+            )
+        )
 
-            candidates.append({
-                "score": 30,
-                "type": "now",
-                "item": item,
-                "platform": platform_name,
-                "release_date": None
-            })
+        # ====================================================
+        # NOW STREAMING
+        # ====================================================
 
-        elif (
-            status == "announced"
-            and release_date
-            and release_date >= today
+        if (
+            status == "now"
+            or (
+                existing
+                and existing.get(
+                    "release_date"
+                ) == str(today)
+            )
         ):
 
-            score = 25
+            release_key = (
+                f"{key}|"
+                f"{platform}|"
+                f"{today}"
+            )
 
-            if platform_name:
-                score += 10
-
-            candidates.append({
-                "score": score,
-                "type": "announced",
-                "item": item,
-                "platform": platform_name,
-                "release_date": release_date
-            })
-
-    candidates.sort(
-        key=lambda x: x["score"],
-        reverse=True
-    )
-
-    # --------------------------------------------------------
-    # 5. POST NEW STORIES
-    # --------------------------------------------------------
-
-    new_posts = 0
-
-    for candidate in candidates:
-
-        if new_posts >= MAX_NEW_POSTS:
-            break
-
-        item = candidate["item"]
-
-        duplicate = False
-
-        for old in state["posted"][-50:]:
-
-            if not isinstance(
-                old,
-                dict
+            if release_key not in (
+                state[
+                    "posted_now"
+                ]
             ):
-                continue
 
-            if similar(
-                item["title"],
-                old.get("title", "")
-            ) >= 0.82:
+                if posts >= (
+                    MAX_POSTS_PER_RUN
+                ):
+                    break
 
-                duplicate = True
-                break
+                success = send_post(
+                    now_caption(
+                        title,
+                        platform,
+                        item[
+                            "language"
+                        ]
+                    ),
+                    image,
+                )
 
-        if duplicate:
+                if success:
+
+                    state[
+                        "posted_now"
+                    ].append(
+                        release_key
+                    )
+
+                    posts += 1
+
+                    print(
+                        "Posted now:",
+                        title
+                    )
+
+            state[
+                "posted_urls"
+            ].append(
+                item["url"]
+            )
+
             continue
 
-        release_date = candidate[
-            "release_date"
-        ]
+        # ====================================================
+        # ANNOUNCEMENT
+        # ====================================================
 
-        if release_date:
+        if not release_date:
 
-            caption = announcement_caption(
-                item["title"],
-                candidate["platform"],
+            print(
+                "No release date:",
+                title
+            )
+
+            continue
+
+        # Don't post old announcements.
+        if release_date <= today:
+
+            state[
+                "posted_urls"
+            ].append(
+                item["url"]
+            )
+
+            continue
+
+        # ====================================================
+        # SAME MOVIE ALREADY KNOWN
+        # ====================================================
+
+        if existing:
+
+            old_date = existing.get(
+                "release_date"
+            )
+
+            old_platform = existing.get(
+                "platform"
+            )
+
+            # Same movie from another feed.
+            if (
+                old_date != str(
+                    release_date
+                )
+                or old_platform != platform
+            ):
+
+                existing.update(
+                    {
+                        "title": title,
+                        "platform": platform,
+                        "release_date": str(
+                            release_date
+                        ),
+                        "language": item[
+                            "language"
+                        ],
+                        "updated_at": now.isoformat(),
+                    }
+                )
+
+                print(
+                    "Updated existing movie:",
+                    title,
+                    release_date
+                )
+
+            state[
+                "posted_urls"
+            ].append(
+                item["url"]
+            )
+
+            continue
+
+        # ====================================================
+        # NEW ANNOUNCEMENT
+        # ====================================================
+
+        if posts >= (
+            MAX_POSTS_PER_RUN
+        ):
+            break
+
+        success = send_post(
+            announcement_caption(
+                title,
+                platform,
+                release_date,
+                item["language"]
+            ),
+            image,
+        )
+
+        if success:
+
+            state[
+                "announcements"
+            ][key] = {
+
+                "title": title,
+
+                "platform": platform,
+
+                "release_date": str(
+                    release_date
+                ),
+
+                "language": item[
+                    "language"
+                ],
+
+                "source_url": item[
+                    "url"
+                ],
+
+                "created_at": now.isoformat(),
+            }
+
+            state[
+                "posted_urls"
+            ].append(
+                item["url"]
+            )
+
+            posts += 1
+
+            print(
+                "Posted announcement:",
+                title,
                 release_date
             )
 
-        else:
+    # ========================================================
+    # RELEASE-DAY REMINDERS
+    # ========================================================
 
-            caption = now_caption(
-                item["title"],
-                candidate["platform"]
+    if posts < MAX_POSTS_PER_RUN:
+
+        for key, record in list(
+            state[
+                "announcements"
+            ].items()
+        ):
+
+            if posts >= (
+                MAX_POSTS_PER_RUN
+            ):
+                break
+
+            try:
+
+                release_date = datetime.strptime(
+                    record[
+                        "release_date"
+                    ],
+                    "%Y-%m-%d"
+                ).date()
+
+            except Exception:
+
+                continue
+
+            release_key = (
+                f"{key}|"
+                f"{record.get('platform', '')}|"
+                f"{release_date}"
             )
 
-        if not send_item(
-            item,
-            caption
-        ):
-            continue
+            if (
+                release_date == today
+                and release_key
+                not in state[
+                    "posted_now"
+                ]
+            ):
 
-        state["posted"].append({
-            "url": item["url"],
-            "title": item["title"],
-            "posted_at": datetime.now(
-                IST
-            ).isoformat()
-        })
-
-        if release_date:
-
-            state["announcements"][
-                item["url"]
-            ] = {
-                "title": item["title"],
-                "platform": candidate[
-                    "platform"
-                ],
-                "release_date": release_date.isoformat(),
-                "released_posted": False,
-                "image": item.get(
-                    "image",
-                    ""
+                success = send_post(
+                    now_caption(
+                        record[
+                            "title"
+                        ],
+                        record[
+                            "platform"
+                        ],
+                        record.get(
+                            "language",
+                            ""
+                        ),
+                    )
                 )
-            }
 
-        new_posts += 1
+                if success:
 
-    # --------------------------------------------------------
-    # 6. KEEP MEMORY UNDER CONTROL
-    # --------------------------------------------------------
+                    state[
+                        "posted_now"
+                    ].append(
+                        release_key
+                    )
 
-    state["posted"] = state[
-        "posted"
-    ][-1000:]
+                    record[
+                        "released_posted"
+                    ] = True
 
-    cleaned = {}
+                    posts += 1
 
-    for key, record in state[
-        "announcements"
-    ].items():
+                    print(
+                        "Posted scheduled now:",
+                        record[
+                            "title"
+                        ]
+                    )
 
-        if not isinstance(
-            record,
-            dict
-        ):
-            continue
-
-        try:
-
-            release_date = date.fromisoformat(
-                record["release_date"]
-            )
-
-        except Exception:
-            continue
-
-        if release_date >= today:
-
-            cleaned[key] = record
-
-        elif record.get(
-            "released_posted",
-            False
-        ):
-
-            cleaned[key] = record
-
-    state[
-        "announcements"
-    ] = cleaned
+    # ========================================================
+    # SAVE
+    # ========================================================
 
     save_state(
         state
     )
 
     print(
-        "Movie bot finished."
+        "Finished. Posts this run:",
+        posts
     )
 
-    print(
-        "Stories checked:",
-        len(unique_items)
-    )
 
-    print(
-        "New posts:",
-        new_posts
-    )
-
-    print(
-        "Release-day posts:",
-        release_posts
-    )
-
+# ============================================================
+# START
+# ============================================================
 
 if __name__ == "__main__":
     main()
