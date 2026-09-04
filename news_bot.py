@@ -99,7 +99,7 @@ def save_posted(posted):
     DATA_FILE.write_text(json.dumps(list(posted)[-500:]))
 
 
-.def send_telegram(text):
+def send_telegram(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
     payload = json.dumps({
