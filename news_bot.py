@@ -39,7 +39,8 @@ def get_feed(url):
         )
         with urllib.request.urlopen(req, timeout=20) as r:
             return r.read()
-    except Exception:
+    except Exception as e:
+        print(f"Feed error: {url} -> {e}")
         return b""
 
 
