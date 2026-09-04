@@ -1124,22 +1124,11 @@ def main():
                 "Posting failed."
             )
 
-    save_memory(
-        memory
-    )
+        save_memory(memory)
 
-        print(
-        "\n======================================"
-    )
-
-    print(
-        f"Posted this run: "
-        f"{posted_count}"
-    )
-
-    print(
-        "======================================"
-    )
+    print("\n======================================")
+    print(f"Posted this run: {posted_count}")
+    print("======================================")
 
 
 if __name__ == "__main__":
