@@ -1,42 +1,44 @@
 {
-  "posted": [
-    {
-      "url": "https://tamil.oneindia.com/ott/ott-releases-may-18-24-exciting-lineup-of-tamil-malayalam-telugu-movies-and-web-series-ready-801529.html",
-      "title": "OTT Releases (May 18–24): இந்த வாரம் OTT-யில் செம களியாட்டம்! ஜோதிகா படம் முதல் தமிழ் ஹாரர் வரை",
-      "posted_at": "2026-09-04T16:16:39.279093+05:30"
-    },
-    {
-      "url": "https://tamil.oneindia.com/ott/thaai-kizhavi-ott-release-jiohotstar-april-10-hidden-twist-revealed-family-weekend-treat-and-highl-788487.html",
-      "title": "Thaai Kizhavi OTT: நாளை ஓடிடியில் வெளியாகும் தாய்க்கிழவி.. புதுசா சஸ்பென்ஸ் இருக்காமே!",
-      "posted_at": "2026-09-04T16:16:41.343380+05:30"
-    },
-    {
-      "url": "https://tamil.oneindia.com/ott/thaai-kizhavi-ott-release-confirmed-jiohotstar-premiere-on-april-10-with-new-twist-787205.html",
-      "title": "Thaai Kizhavi OTT: சொன்ன தேதிக்கு முன்பு ஓடிடியில் வந்த தாய் கிழவி.. அதிகாரப்பூர்வமான அறிவிப்பு! ட்விஸ்ட்",
-      "posted_at": "2026-09-04T16:16:43.526764+05:30"
-    }
-  ],
   "announcements": {
     "https://tamil.oneindia.com/ott/ott-releases-may-18-24-exciting-lineup-of-tamil-malayalam-telugu-movies-and-web-series-ready-801529.html": {
-      "title": "OTT Releases (May 18–24): இந்த வாரம் OTT-யில் செம களியாட்டம்! ஜோதிகா படம் முதல் தமிழ் ஹாரர் வரை",
+      "image": "https://imagesvs.oneindia.com/webp/ta/img/2026/05/ottreleases-1779351358.jpg",
       "platform": "Prime Video",
       "release_date": "2027-05-18",
       "released_posted": false,
-      "image": "https://imagesvs.oneindia.com/webp/ta/img/2026/05/ottreleases-1779351358.jpg"
-    },
-    "https://tamil.oneindia.com/ott/thaai-kizhavi-ott-release-jiohotstar-april-10-hidden-twist-revealed-family-weekend-treat-and-highl-788487.html": {
-      "title": "Thaai Kizhavi OTT: நாளை ஓடிடியில் வெளியாகும் தாய்க்கிழவி.. புதுசா சஸ்பென்ஸ் இருக்காமே!",
-      "platform": "JioHotstar",
-      "release_date": "2027-04-10",
-      "released_posted": false,
-      "image": "https://imagesvs.oneindia.com/webp/ta/img/2026/04/thaaikizhaviott8-1775738382.jpg"
+      "title": "OTT Releases (May 18–24): இந்த வாரம் OTT-யில் செம களியாட்டம்! ஜோதிகா படம் முதல் தமிழ் ஹாரர் வரை"
     },
     "https://tamil.oneindia.com/ott/thaai-kizhavi-ott-release-confirmed-jiohotstar-premiere-on-april-10-with-new-twist-787205.html": {
-      "title": "Thaai Kizhavi OTT: சொன்ன தேதிக்கு முன்பு ஓடிடியில் வந்த தாய் கிழவி.. அதிகாரப்பூர்வமான அறிவிப்பு! ட்விஸ்ட்",
+      "image": "https://imagesvs.oneindia.com/webp/ta/img/2026/04/thaaikizhaviott3-1775348176.jpg",
       "platform": "JioHotstar",
       "release_date": "2027-04-10",
       "released_posted": false,
-      "image": "https://imagesvs.oneindia.com/webp/ta/img/2026/04/thaaikizhaviott3-1775348176.jpg"
+      "title": "Thaai Kizhavi OTT: சொன்ன தேதிக்கு முன்பு ஓடிடியில் வந்த தாய் கிழவி.. அதிகாரப்பூர்வமான அறிவிப்பு! ட்விஸ்ட்"
+    },
+    "https://tamil.oneindia.com/ott/thaai-kizhavi-ott-release-jiohotstar-april-10-hidden-twist-revealed-family-weekend-treat-and-highl-788487.html": {
+      "image": "https://imagesvs.oneindia.com/webp/ta/img/2026/04/thaaikizhaviott8-1775738382.jpg",
+      "platform": "JioHotstar",
+      "release_date": "2027-04-10",
+      "released_posted": false,
+      "title": "Thaai Kizhavi OTT: நாளை ஓடிடியில் வெளியாகும் தாய்க்கிழவி.. புதுசா சஸ்பென்ஸ் இருக்காமே!"
     }
-  }
+  },
+  "posted": [
+    {
+      "posted_at": "2026-09-04T16:16:39.279093+05:30",
+      "title": "OTT Releases (May 18–24): இந்த வாரம் OTT-யில் செம களியாட்டம்! ஜோதிகா படம் முதல் தமிழ் ஹாரர் வரை",
+      "url": "https://tamil.oneindia.com/ott/ott-releases-may-18-24-exciting-lineup-of-tamil-malayalam-telugu-movies-and-web-series-ready-801529.html"
+    },
+    {
+      "posted_at": "2026-09-04T16:16:41.343380+05:30",
+      "title": "Thaai Kizhavi OTT: நாளை ஓடிடியில் வெளியாகும் தாய்க்கிழவி.. புதுசா சஸ்பென்ஸ் இருக்காமே!",
+      "url": "https://tamil.oneindia.com/ott/thaai-kizhavi-ott-release-jiohotstar-april-10-hidden-twist-revealed-family-weekend-treat-and-highl-788487.html"
+    },
+    {
+      "posted_at": "2026-09-04T16:16:43.526764+05:30",
+      "title": "Thaai Kizhavi OTT: சொன்ன தேதிக்கு முன்பு ஓடிடியில் வந்த தாய் கிழவி.. அதிகாரப்பூர்வமான அறிவிப்பு! ட்விஸ்ட்",
+      "url": "https://tamil.oneindia.com/ott/thaai-kizhavi-ott-release-confirmed-jiohotstar-premiere-on-april-10-with-new-twist-787205.html"
+    }
+  ],
+  "posted_now": [],
+  "posted_urls": []
 }
