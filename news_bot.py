@@ -1,270 +1,148 @@
 import os
 import re
 import json
+import html
 import time
+import hashlib
 import urllib.request
-import urllib.error
+import urllib.parse
 import xml.etree.ElementTree as ET
-from pathlib import Path
-from html import unescape
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
 
 # ============================================================
-# CONFIG
+# CONFIGURATION
 # ============================================================
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-CHANNEL = os.environ["CHANNEL"]
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+CHANNEL = os.environ.get("CHANNEL", "@ouranime001")
 
-FEEDS = [
-    "https://www.animenewsnetwork.com/rss.xml",
-    "https://www.otakunews.com/Rss",
-    "https://cr-news-api-service.prd.crunchyrollsvc.com/v1/en-US/rss",
-]
-
-DATA_FILE = Path("posted.json")
+POSTED_FILE = "posted.json"
 
 MAX_POSTS_PER_RUN = 3
 
+# How old an article can be and still be considered fresh.
+# The bot runs every 30 minutes, so 6 hours gives some protection
+# against feeds updating late while still keeping the channel fresh.
+MAX_ARTICLE_AGE_HOURS = 6
 
-# ============================================================
-# ANIME SIGNALS
-# ============================================================
-
-ANIME_PATTERNS = [
-    r"\banime\b",
-    r"\bmanga\b",
-    r"\banime series\b",
-    r"\banime film\b",
-    r"\banime movie\b",
-    r"\banime adaptation\b",
-    r"\banimated series\b",
-    r"\banimated film\b",
-    r"\banimation studio\b",
-    r"\bcrunchyroll\b",
+FEEDS = [
+    {
+        "name": "Anime News Network",
+        "url": "https://www.animenewsnetwork.com/rss.xml",
+        "weight": 3,
+    },
+    {
+        "name": "Otaku News",
+        "url": "https://www.otakunews.com/Rss",
+        "weight": 2,
+    },
+    {
+        "name": "Crunchyroll News",
+        "url": "https://cr-news-api-service.prd.crunchyrollsvc.com/v1/en-US/rss",
+        "weight": 3,
+    },
 ]
 
 
 # ============================================================
-# MAJOR NEWS SIGNALS
+# HTTP
 # ============================================================
 
-MAJOR_NEWS = [
-    r"\bseason\s+\d+\b",
-    r"\bnew season\b",
-    r"\bfinal season\b",
-    r"\bsequel\b",
-    r"\bsequel announced\b",
-    r"\bsequel confirmed\b",
-
-    r"\brelease date\b",
-    r"\bpremiere date\b",
-    r"\bair date\b",
-    r"\bbroadcast date\b",
-
-    r"\bofficial trailer\b",
-    r"\bofficial teaser\b",
-    r"\bnew trailer\b",
-    r"\bnew teaser\b",
-
-    r"\bofficially announced\b",
-    r"\bofficial announcement\b",
-    r"\bofficially confirmed\b",
-
-    r"\banime adaptation\b",
-    r"\badaptation announced\b",
-
-    r"\bproduction begins\b",
-    r"\bproduction started\b",
-    r"\bproduction confirmed\b",
-
-    r"\brenewed\b",
-    r"\brenewal\b",
-
-    r"\bstreaming release\b",
-    r"\bstreaming date\b",
-
-    r"\bdelayed\b",
-    r"\bpostponed\b",
-    r"\brescheduled\b",
-    r"\bcancelled\b",
-    r"\bcanceled\b",
-]
+USER_AGENT = (
+    "Mozilla/5.0 (compatible; AnimeNewsBot/1.0; "
+    "+https://github.com/)"
+)
 
 
-# ============================================================
-# IMPORTANT EPISODE CHANGES
-# ============================================================
+def http_get(url, timeout=20):
+    try:
+        request = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "application/rss+xml, application/xml, text/xml, text/html, */*",
+            },
+        )
 
-EPISODE_NEWS = [
-    r"\bepisode\s+\d+\b.*\b(release date|delayed|postponed|rescheduled|cancelled|canceled|air date)\b",
-    r"\bepisodes?\b.*\b(delayed|postponed|rescheduled|cancelled|canceled)\b",
-]
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read()
 
-
-# ============================================================
-# BAD / LOW-VALUE CONTENT
-# ============================================================
-
-BAD_TITLE = [
-    r"\breview\b",
-    r"\breviews\b",
-    r"\binterview\b",
-    r"\bpodcast\b",
-
-    r"\branking\b",
-    r"\brankings\b",
-    r"\btop\s+\d+\b",
-    r"\b\d+\s+(best|worst|greatest|favorite|favourite)\b",
-    r"\bbest anime\b",
-    r"\bworst anime\b",
-
-    r"\bopinion\b",
-    r"\breaction\b",
-
-    r"\bfan theory\b",
-    r"\bfan theories\b",
-
-    r"\brumor\b",
-    r"\brumour\b",
-    r"\brumors\b",
-    r"\brumours\b",
-
-    r"\bcelebrity\b",
-    r"\bgossip\b",
-    r"\bfashion\b",
-
-    r"\bmerchandise\b",
-    r"\bcollectible\b",
-    r"\bcollectibles\b",
-    r"\bfigurine\b",
-
-    r"\bcosplay\b",
-    r"\bquiz\b",
-
-    r"\bvideo game\b",
-    r"\bmobile game\b",
-    r"\bgame news\b",
-]
-
-
-# ============================================================
-# ADULT CONTENT
-# ============================================================
-
-ADULT_PATTERNS = [
-    r"\bhentai\b",
-    r"\becchi\b",
-    r"\bporn\b",
-    r"\bxxx\b",
-    r"\berotic\b",
-    r"\bexplicit\b",
-    r"\badult anime\b",
-]
-
-
-# ============================================================
-# SOURCE TRUST
-# ============================================================
-
-SOURCE_WEIGHTS = {
-    "animenewsnetwork.com": 3,
-    "otakunews.com": 2,
-    "crunchyroll.com": 3,
-}
+    except Exception:
+        return None
 
 
 # ============================================================
 # TEXT HELPERS
 # ============================================================
 
-def clean(text):
+def clean_html(text):
     if not text:
         return ""
 
-    text = unescape(text)
+    text = html.unescape(text)
 
     text = re.sub(
-        r"<script.*?</script>",
+        r"<script\b[^>]*>.*?</script>",
         " ",
         text,
-        flags=re.IGNORECASE | re.DOTALL
+        flags=re.IGNORECASE | re.DOTALL,
     )
 
     text = re.sub(
-        r"<style.*?</style>",
+        r"<style\b[^>]*>.*?</style>",
         " ",
         text,
-        flags=re.IGNORECASE | re.DOTALL
+        flags=re.IGNORECASE | re.DOTALL,
     )
 
-    text = re.sub(
-        r"<[^>]+>",
-        " ",
-        text
-    )
+    text = re.sub(r"<[^>]+>", " ", text)
 
-    text = re.sub(
-        r"\s+",
-        " ",
-        text
-    )
+    text = re.sub(r"\s+", " ", text)
 
     return text.strip()
 
 
-def matches(text, patterns):
-    text = text.lower()
+def shorten(text, limit=420):
+    text = clean_html(text)
 
-    return any(
-        re.search(
-            pattern,
-            text,
-            re.IGNORECASE
-        )
-        for pattern in patterns
-    )
+    if len(text) <= limit:
+        return text
+
+    cut = text[:limit]
+
+    if " " in cut:
+        cut = cut.rsplit(" ", 1)[0]
+
+    return cut.rstrip(" .,;:") + "…"
 
 
-def normalize_url(url):
-    if not url:
-        return ""
+def normalize_text(text):
+    text = clean_html(text).lower()
 
-    url = url.strip()
+    text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text)
 
-    url = re.sub(
-        r"([?&])(utm_[^=&]+|fbclid|gclid)=[^&]*",
-        r"\1",
-        url,
-        flags=re.IGNORECASE
-    )
-
-    url = re.sub(
-        r"[?&]+$",
-        "",
-        url
-    )
-
-    return url
+    return text.strip()
 
 
 def normalize_title(title):
-    title = clean(title).lower()
+    text = normalize_text(title)
 
-    title = re.sub(
-        r"[^a-z0-9\s]",
-        " ",
-        title
-    )
+    # Remove common website prefixes.
+    prefixes = [
+        "crunchyroll news",
+        "anime news network",
+        "otaku news",
+    ]
 
-    title = re.sub(
-        r"\s+",
-        " ",
-        title
-    )
+    for prefix in prefixes:
+        if text.startswith(prefix + " "):
+            text = text[len(prefix):].strip()
 
-    return title.strip()
+    return text
 
 
 def title_similarity(a, b):
@@ -274,817 +152,924 @@ def title_similarity(a, b):
     if not a or not b:
         return 0
 
-    return SequenceMatcher(
-        None,
-        a,
-        b
-    ).ratio()
-
-
-def source_score(url):
-    url = url.lower()
-
-    for domain, score in SOURCE_WEIGHTS.items():
-
-        if domain in url:
-            return score
-
-    return 0
+    return SequenceMatcher(None, a, b).ratio()
 
 
 # ============================================================
-# IMAGE EXTRACTION
+# DATE HELPERS
 # ============================================================
 
-def extract_image(element):
+def parse_date(value):
+    if not value:
+        return None
 
-    # RSS enclosure
-    enclosure = element.find("enclosure")
+    value = value.strip()
 
-    if enclosure is not None:
+    formats = [
+        "%a, %d %b %Y %H:%M:%S %z",
+        "%a, %d %b %Y %H:%M:%S GMT",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+    ]
 
-        image_url = enclosure.attrib.get(
-            "url",
-            ""
-        )
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(value, fmt)
 
-        content_type = enclosure.attrib.get(
-            "type",
-            ""
-        ).lower()
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
 
-        if (
-            image_url
-            and "image" in content_type
-        ):
-            return image_url
+            return dt.astimezone(timezone.utc)
+
+        except Exception:
+            pass
+
+    return None
 
 
-    # Media RSS
+def article_is_fresh(date_value):
+    dt = parse_date(date_value)
+
+    if not dt:
+        # If the feed does not give a usable date, don't automatically
+        # throw the article away.
+        return True
+
+    now = datetime.now(timezone.utc)
+
+    age = now - dt
+
+    if age.total_seconds() < 0:
+        return True
+
+    return age.total_seconds() <= MAX_ARTICLE_AGE_HOURS * 3600
+
+
+# ============================================================
+# RSS PARSING
+# ============================================================
+
+def local_name(tag):
+    if "}" in tag:
+        return tag.split("}", 1)[1].lower()
+
+    return tag.lower()
+
+
+def find_child(element, names):
+    names = {name.lower() for name in names}
+
     for child in list(element):
+        if local_name(child.tag) in names:
+            return child
 
-        tag = child.tag.lower()
-
-        if (
-            "thumbnail" in tag
-            or "content" in tag
-        ):
-
-            url = child.attrib.get(
-                "url",
-                ""
-            )
-
-            if url:
-                return url
+    return None
 
 
-    # Image inside description
-    for field in [
-        "description",
-        "{http://purl.org/rss/1.0/modules/content/}encoded"
-    ]:
+def child_text(element, names):
+    child = find_child(element, names)
 
-        value = element.findtext(
-            field,
-            ""
-        )
+    if child is None:
+        return ""
 
-        if value:
+    return child.text or ""
 
-            match = re.search(
-                r'<img[^>]+src=["\']([^"\']+)',
-                value,
-                re.IGNORECASE
-            )
 
-            if match:
-                return match.group(1)
+def get_link(item):
+    # Normal RSS <link>
+    link = child_text(item, ["link"]).strip()
 
+    if link:
+        return html.unescape(link)
+
+    # Atom-style links
+    for child in list(item):
+        if local_name(child.tag) == "link":
+            href = child.attrib.get("href")
+
+            if href:
+                return html.unescape(href)
 
     return ""
 
 
-# ============================================================
-# FEED READER
-# ============================================================
+def get_image_from_item(item):
+    # RSS enclosure
+    for child in list(item):
+        name = local_name(child.tag)
 
-def get_feed(url):
+        if name in ("enclosure", "content"):
+            url = (
+                child.attrib.get("url")
+                or child.attrib.get("href")
+                or ""
+            )
 
-    request = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent":
-                "Mozilla/5.0 AnimeNewsBot"
-        }
-    )
+            if url:
+                media_type = child.attrib.get("type", "").lower()
 
-    with urllib.request.urlopen(
-        request,
-        timeout=20
-    ) as response:
+                if (
+                    "image" in media_type
+                    or name == "content"
+                    or not media_type
+                ):
+                    return html.unescape(url)
 
-        return response.read()
+    # media:content / media:thumbnail
+    for child in list(item):
+        name = local_name(child.tag)
+
+        if name in ("thumbnail", "content"):
+            url = (
+                child.attrib.get("url")
+                or child.attrib.get("href")
+                or ""
+            )
+
+            if url:
+                return html.unescape(url)
+
+    return ""
 
 
-def parse_feed(xml_data):
+def parse_feed(xml_data, source_name, source_weight):
+    if not xml_data:
+        return []
 
-    root = ET.fromstring(
-        xml_data
-    )
+    try:
+        root = ET.fromstring(xml_data)
+    except Exception:
+        return []
 
-    articles = []
+    items = []
 
-
-    # --------------------------------------------------------
     # RSS
-    # --------------------------------------------------------
+    for item in root.iter():
+        if local_name(item.tag) not in ("item", "entry"):
+            continue
 
-    for item in root.findall(
-        ".//item"
-    ):
+        title = child_text(item, ["title"]).strip()
 
-        title = clean(
-            item.findtext(
-                "title",
-                ""
-            )
-        )
+        link = get_link(item)
 
-        link = clean(
-            item.findtext(
-                "link",
-                ""
-            )
-        )
-
-        description = clean(
-            item.findtext(
-                "description",
-                ""
-            )
-        )
-
-        encoded = clean(
-            item.findtext(
-                "{http://purl.org/rss/1.0/modules/content/}encoded",
-                ""
-            )
-        )
-
-        description = (
-            f"{description} {encoded}"
+        description = child_text(
+            item,
+            ["description", "summary", "content"],
         ).strip()
 
-        image = extract_image(
-            item
+        pub_date = child_text(
+            item,
+            ["pubDate", "published", "updated", "date"],
+        ).strip()
+
+        image = get_image_from_item(item)
+
+        if not title or not link:
+            continue
+
+        items.append(
+            {
+                "title": clean_html(title),
+                "summary": clean_html(description),
+                "url": link,
+                "date": pub_date,
+                "image": image,
+                "source": source_name,
+                "weight": source_weight,
+            }
         )
 
-
-        if title and link:
-
-            articles.append({
-                "title": title,
-                "link": link,
-                "description": description,
-                "image": image,
-            })
-
-
-    # --------------------------------------------------------
-    # ATOM
-    # --------------------------------------------------------
-
-    if not articles:
-
-        ns = {
-            "atom":
-                "http://www.w3.org/2005/Atom"
-        }
-
-        for entry in root.findall(
-            ".//atom:entry",
-            ns
-        ):
-
-            title = clean(
-                entry.findtext(
-                    "atom:title",
-                    "",
-                    ns
-                )
-            )
-
-            description = clean(
-                entry.findtext(
-                    "atom:summary",
-                    "",
-                    ns
-                )
-            )
-
-            link = ""
-
-            for link_element in entry.findall(
-                "atom:link",
-                ns
-            ):
-
-                href = link_element.attrib.get(
-                    "href",
-                    ""
-                )
-
-                rel = link_element.attrib.get(
-                    "rel",
-                    ""
-                )
-
-                if href and (
-                    rel == "alternate"
-                    or not link
-                ):
-                    link = href
-
-
-            if title and link:
-
-                articles.append({
-                    "title": title,
-                    "link": link,
-                    "description": description,
-                    "image": "",
-                })
-
-
-    return articles
+    return items
 
 
 # ============================================================
-# ARTICLE SCORING
+# ARTICLE IMAGE EXTRACTION
 # ============================================================
 
-def score_article(article):
+def extract_image_from_html(page):
+    if not page:
+        return ""
 
-    title = article["title"]
-    description = article["description"]
-    link = article["link"]
-
-    text = (
-        f"{title} {description}"
-    )
-
-
-    # --------------------------------------------------------
-    # Immediate rejection
-    # --------------------------------------------------------
-
-    if matches(
-        text,
-        ADULT_PATTERNS
-    ):
-        return -100
-
-
-    if matches(
-        title,
-        BAD_TITLE
-    ):
-        return -50
-
-
-    score = 0
-
-
-    # --------------------------------------------------------
-    # Anime relevance
-    # --------------------------------------------------------
-
-    anime_count = 0
-
-    for pattern in ANIME_PATTERNS:
-
-        if re.search(
-            pattern,
-            text,
-            re.IGNORECASE
-        ):
-            anime_count += 1
-
-
-    if anime_count >= 2:
-        score += 6
-
-    elif anime_count == 1:
-        score += 4
-
-
-    # --------------------------------------------------------
-    # Major news
-    # --------------------------------------------------------
-
-    if matches(
-        title,
-        MAJOR_NEWS
-    ):
-        score += 8
-
-    elif matches(
-        description,
-        MAJOR_NEWS
-    ):
-        score += 3
-
-
-    # --------------------------------------------------------
-    # Episode changes
-    # --------------------------------------------------------
-
-    if matches(
-        title,
-        EPISODE_NEWS
-    ):
-        score += 8
-
-    elif matches(
-        description,
-        EPISODE_NEWS
-    ):
-        score += 3
-
-
-    # --------------------------------------------------------
-    # Official confirmation
-    # --------------------------------------------------------
-
-    official = [
-        r"\bofficially\b",
-        r"\bofficial announcement\b",
-        r"\bofficial trailer\b",
-        r"\bofficial teaser\b",
-        r"\bconfirmed\b",
-        r"\bannounced\b",
+    # og:image
+    patterns = [
+        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+        r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
     ]
 
-    for pattern in official:
-
-        if re.search(
+    for pattern in patterns:
+        match = re.search(
             pattern,
-            title,
-            re.IGNORECASE
-        ):
-            score += 2
+            page,
+            flags=re.IGNORECASE,
+        )
 
+        if match:
+            image_url = html.unescape(match.group(1).strip())
 
-    # --------------------------------------------------------
-    # Source reliability
-    # --------------------------------------------------------
+            if image_url.startswith("//"):
+                image_url = "https:" + image_url
 
-    score += source_score(
-        link
+            if image_url.startswith("http"):
+                return image_url
+
+    # First reasonably sized image.
+    images = re.findall(
+        r'<img[^>]+src=["\']([^"\']+)["\']',
+        page,
+        flags=re.IGNORECASE,
     )
 
+    for image_url in images:
+        image_url = html.unescape(image_url.strip())
 
-    # --------------------------------------------------------
-    # Rumor penalty
-    # --------------------------------------------------------
+        if image_url.startswith("//"):
+            image_url = "https:" + image_url
 
-    if re.search(
-        r"\brumou?r\b",
-        text,
-        re.IGNORECASE
+        if not image_url.startswith("http"):
+            continue
+
+        lowered = image_url.lower()
+
+        if any(
+            x in lowered
+            for x in [
+                "logo",
+                "icon",
+                "avatar",
+                "favicon",
+                "sprite",
+            ]
+        ):
+            continue
+
+        return image_url
+
+    return ""
+
+
+def get_article_image(article):
+    if article.get("image"):
+        return article["image"]
+
+    page = http_get(article["url"])
+
+    if not page:
+        return ""
+
+    try:
+        page_text = page.decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+    return extract_image_from_html(page_text)
+
+
+# ============================================================
+# ANIME NEWS FILTER
+# ============================================================
+
+IMPORTANT_ANIME_PATTERNS = [
+    # Seasons / cours
+    r"\bseason\s+\d+\b",
+    r"\bnew\s+season\b",
+    r"\bsecond\s+cour\b",
+    r"\bthird\s+cour\b",
+    r"\bcour\s+\d+\b",
+
+    # Release / premiere
+    r"\bpremiere\b",
+    r"\bpremiere\s+date\b",
+    r"\brelease\s+date\b",
+    r"\breleases?\s+on\b",
+    r"\bdebut\b",
+    r"\bdebut\s+date\b",
+    r"\bstarts?\s+on\b",
+
+    # Announcements
+    r"\banime\s+announced\b",
+    r"\banime\s+adaptation\b",
+    r"\banime\s+confirmed\b",
+    r"\banime\s+revealed\b",
+    r"\bnew\s+anime\b",
+    r"\bproduction\s+confirmed\b",
+    r"\bproduction\s+announced\b",
+
+    # Important trailers / visuals
+    r"\bnew\s+trailer\b",
+    r"\btrailer\s+reveals?\b",
+    r"\btrailer\s+unveils?\b",
+    r"\bkey\s+visual\b",
+    r"\bmain\s+visual\b",
+
+    # Streaming
+    r"\bstream(?:ing)?\s+on\b",
+    r"\bstreaming\s+date\b",
+    r"\bnow\s+streaming\b",
+
+    # Delays / changes
+    r"\bdelayed\b",
+    r"\bdelay\b",
+    r"\bpostponed\b",
+    r"\brescheduled\b",
+    r"\bnew\s+release\s+date\b",
+
+    # Major adaptations
+    r"\bmovie\s+adaptation\b",
+    r"\bfilm\s+adaptation\b",
+    r"\blive[- ]action\s+adaptation\b",
+    r"\bgreenlit\b",
+]
+
+
+BAD_ANIME_PATTERNS = [
+    # Cast-only stories
+    r"\bvoice\s+cast\b",
+    r"\bcast\s+revealed\b",
+    r"\bcast\s+announced\b",
+    r"\badditional\s+cast\b",
+    r"\bvoice\s+actor\b",
+    r"\bvoice\s+actress\b",
+    r"\bjoins?\s+the\s+cast\b",
+
+    # Interviews / features
+    r"\binterview\b",
+    r"\bq&a\b",
+    r"\bbehind\s+the\s+scenes\b",
+    r"\bfeature\b",
+    r"\bspotlight\b",
+
+    # Recaps / guides
+    r"\brecap\b",
+    r"\breview\b",
+    r"\bexplained\b",
+    r"\bguide\b",
+    r"\bquiz\b",
+    r"\btop\s+\d+\b",
+    r"\bbest\s+\d+\b",
+
+    # Merchandise
+    r"\bmerch\b",
+    r"\bmerchandise\b",
+    r"\bfigures?\b",
+    r"\bcollectibles?\b",
+
+    # Games
+    r"\bmobile\s+game\b",
+    r"\bvideo\s+game\b",
+    r"\bgame\s+update\b",
+    r"\bdlc\b",
+
+    # Music-only
+    r"\bnew\s+single\b",
+    r"\bmusic\s+video\b",
+]
+
+
+def is_good_anime_news(title, summary=""):
+    text = f"{title} {summary}".lower()
+
+    # Reject obvious low-value articles.
+    for pattern in BAD_ANIME_PATTERNS:
+
+        if re.search(pattern, text, re.IGNORECASE):
+
+            # Allow the article if the same article also contains
+            # a genuinely important announcement.
+            important = any(
+                re.search(pattern2, text, re.IGNORECASE)
+                for pattern2 in IMPORTANT_ANIME_PATTERNS
+            )
+
+            if not important:
+                return False
+
+    # Release/premiere announcement.
+    release_signal = any(
+        re.search(pattern, text, re.IGNORECASE)
+        for pattern in [
+            r"\bpremiere\b",
+            r"\brelease\s+date\b",
+            r"\bdebut\b",
+            r"\breleases?\s+on\b",
+            r"\bstarts?\s+on\b",
+            r"\bstream(?:ing)?\s+on\b",
+        ]
+    )
+
+    announcement_signal = any(
+        re.search(pattern, text, re.IGNORECASE)
+        for pattern in [
+            r"\bannounced\b",
+            r"\bconfirmed\b",
+            r"\brevealed\b",
+            r"\bunveils?\b",
+            r"\bset\s+to\b",
+        ]
+    )
+
+    if release_signal and announcement_signal:
+        return True
+
+    # Season/cour announcement.
+    season_signal = any(
+        re.search(pattern, text, re.IGNORECASE)
+        for pattern in [
+            r"\bseason\s+\d+\b",
+            r"\bnew\s+season\b",
+            r"\bsecond\s+cour\b",
+            r"\bthird\s+cour\b",
+            r"\bcour\s+\d+\b",
+        ]
+    )
+
+    if season_signal and (
+        release_signal or announcement_signal
     ):
-        score -= 5
+        return True
 
-
-    return score
-
-
-# ============================================================
-# FINAL DECISION
-# ============================================================
-
-def is_worth_posting(article):
-
-    title = article["title"]
-    description = article["description"]
-
-    text = (
-        f"{title} {description}"
+    # General important-news score.
+    score = sum(
+        1
+        for pattern in IMPORTANT_ANIME_PATTERNS
+        if re.search(pattern, text, re.IGNORECASE)
     )
 
+    if score >= 2:
+        return True
 
-    # Must be anime-related
-    if not matches(
-        text,
-        ANIME_PATTERNS
-    ):
-        return False
-
-
-    score = score_article(
-        article
+    # Strong official-news language.
+    strong_score = sum(
+        1
+        for pattern in [
+            r"\bofficial\b",
+            r"\bannounced\b",
+            r"\bconfirmed\b",
+            r"\brevealed\b",
+            r"\bunveils?\b",
+            r"\bset\s+to\b",
+        ]
+        if re.search(pattern, text, re.IGNORECASE)
     )
 
-
-    # High-quality news only
-    return score >= 10
-
-
-# ============================================================
-# DUPLICATE CHECK
-# ============================================================
-
-def is_duplicate(
-    article,
-    posted
-):
-
-    url = normalize_url(
-        article["link"]
-    )
-
-    title = article["title"]
-
-
-    for old in posted:
-
-        if isinstance(
-            old,
-            dict
-        ):
-
-            old_url = normalize_url(
-                old.get(
-                    "url",
-                    ""
-                )
-            )
-
-            old_title = old.get(
-                "title",
-                ""
-            )
-
-        else:
-
-            old_url = normalize_url(
-                str(old)
-            )
-
-            old_title = ""
-
-
-        # Exact URL
-        if (
-            url
-            and url == old_url
-        ):
-            return True
-
-
-        # Same story, different URL
-        if old_title:
-
-            if title_similarity(
-                title,
-                old_title
-            ) >= 0.82:
-
-                return True
-
+    if score >= 1 and strong_score >= 2:
+        return True
 
     return False
 
 
 # ============================================================
-# STORAGE
+# DUPLICATE MEMORY
 # ============================================================
 
 def load_posted():
-
-    if not DATA_FILE.exists():
+    if not os.path.exists(POSTED_FILE):
         return []
 
     try:
-
         with open(
-            DATA_FILE,
+            POSTED_FILE,
             "r",
-            encoding="utf-8"
+            encoding="utf-8",
         ) as file:
+            data = json.load(file)
 
-            data = json.load(
-                file
-            )
+        if isinstance(data, list):
+            return data
 
-            if isinstance(
-                data,
-                list
-            ):
-                return data
+        if isinstance(data, dict):
+            return data.get("posts", [])
 
-    except Exception as e:
-
-        print(
-            "posted.json error:",
-            e
-        )
-
+    except Exception:
+        pass
 
     return []
 
 
-def save_posted(posted):
-
-    posted = posted[-1000:]
+def save_posted(posts):
+    # Keep the memory from becoming unnecessarily huge.
+    posts = posts[-1000:]
 
     with open(
-        DATA_FILE,
+        POSTED_FILE,
         "w",
-        encoding="utf-8"
+        encoding="utf-8",
     ) as file:
-
         json.dump(
-            posted,
+            posts,
             file,
             ensure_ascii=False,
-            indent=2
+            indent=2,
         )
 
 
-# ============================================================
-# TELEGRAM
-# ============================================================
+def article_id(article):
+    url = article.get("url", "").strip()
 
-def telegram_request(
-    method,
-    data
-):
+    if url:
+        return hashlib.sha256(
+            url.encode("utf-8")
+        ).hexdigest()
+
+    return hashlib.sha256(
+        article.get("title", "").encode("utf-8")
+    ).hexdigest()
+
+
+def is_duplicate(article, posted):
+    aid = article_id(article)
+
+    for old in posted:
+        if isinstance(old, dict):
+            if old.get("id") == aid:
+                return True
+
+            old_title = old.get("title", "")
+
+            if old_title and title_similarity(
+                article["title"],
+                old_title
+            ) >= 0.88:
+                return True
+
+        elif isinstance(old, str):
+            if old == aid:
+                return True
+
+    return False
+
+
+def article_score(article):
+    title = article.get("title", "")
+    summary = article.get("summary", "")
+    text = f"{title} {summary}".lower()
+
+    score = article.get("weight", 1) * 2
+
+    important_patterns = [
+        r"\bseason\s+\d+\b",
+        r"\bpremiere\s+date\b",
+        r"\brelease\s+date\b",
+        r"\banime\s+announced\b",
+        r"\banime\s+adaptation\b",
+        r"\bdelayed\b",
+        r"\bpostponed\b",
+        r"\brescheduled\b",
+    ]
+
+    for pattern in important_patterns:
+        if re.search(pattern, text, re.IGNORECASE):
+            score += 5
+
+    strong_patterns = [
+        r"\bofficial\b",
+        r"\bannounced\b",
+        r"\bconfirmed\b",
+        r"\brevealed\b",
+        r"\bunveils?\b",
+    ]
+
+    for pattern in strong_patterns:
+        if re.search(pattern, text, re.IGNORECASE):
+            score += 2
+
+    dt = parse_date(article.get("date", ""))
+
+    if dt:
+        age_hours = (
+            datetime.now(timezone.utc) - dt
+        ).total_seconds() / 3600
+
+        if age_hours <= 2:
+            score += 5
+        elif age_hours <= 4:
+            score += 3
+        elif age_hours <= 6:
+            score += 1
+
+    return score
+
+
+def clean_title(title):
+    title = clean_html(title)
+
+    title = re.sub(
+        r"\s*[-|–—]\s*(Crunchyroll|Anime News Network|Otaku News)\s*$",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+
+    return title.strip()
+
+
+def telegram_request(method, payload):
+    if not BOT_TOKEN:
+        return None
 
     url = (
         f"https://api.telegram.org/bot"
         f"{BOT_TOKEN}/{method}"
     )
 
-    body = json.dumps(
-        data
+    data = urllib.parse.urlencode(
+        payload
     ).encode("utf-8")
 
-
-    request = urllib.request.Request(
-        url,
-        data=body,
-        headers={
-            "Content-Type":
-                "application/json"
-        },
-        method="POST"
-    )
-
-
     try:
+        request = urllib.request.Request(
+            url,
+            data=data,
+            headers={
+                "User-Agent": USER_AGENT,
+            },
+        )
 
         with urllib.request.urlopen(
             request,
             timeout=30
         ) as response:
 
-            return json.loads(
-                response.read().decode()
+            raw = response.read().decode(
+                "utf-8",
+                errors="ignore"
             )
 
+            return json.loads(raw)
 
-    except urllib.error.HTTPError as e:
-
-        if e.code == 429:
-
-            try:
-
-                error_data = json.loads(
-                    e.read().decode()
-                )
-
-                wait_time = (
-                    error_data
-                    .get(
-                        "parameters",
-                        {}
-                    )
-                    .get(
-                        "retry_after",
-                        5
-                    )
-                )
-
-                print(
-                    "Telegram rate limit.",
-                    "Waiting:",
-                    wait_time
-                )
-
-                time.sleep(
-                    wait_time
-                )
-
-                return telegram_request(
-                    method,
-                    data
-                )
-
-            except Exception:
-                pass
-
-
-        print(
-            "Telegram HTTP error:",
-            e
-        )
-
+    except Exception:
         return None
 
 
-    except Exception as e:
-
-        print(
-            "Telegram error:",
-            e
-        )
-
-        return None
-
-
-# ============================================================
-# CREATE POST
-# ============================================================
-
-def create_caption(article):
-
-    title = clean(
-        article["title"]
-    )
-
-    description = clean(
-        article["description"]
-    )
-
-
-    # Remove HTML leftovers
-    description = re.sub(
-        r"\s+",
-        " ",
-        description
-    ).strip()
-
-
-    # Keep caption short
-    if len(description) > 350:
-
-        description = (
-            description[:347]
-            + "..."
-        )
-
-
-    if description:
-
-        caption = (
-            f"📰 {title}\n\n"
-            f"{description}"
-        )
-
-    else:
-
-        caption = (
-            f"📰 {title}"
-        )
-
-
-    # Telegram photo caption limit
-    return caption[:1024]
-
-
-# ============================================================
-# SEND PHOTO
-# ============================================================
-
-def send_photo(
-    image,
-    caption
-):
-
-    return telegram_request(
-        "sendPhoto",
-        {
-            "chat_id": CHANNEL,
-            "photo": image,
-            "caption": caption,
-        }
-    )
-
-
-# ============================================================
-# SEND TEXT FALLBACK
-# ============================================================
-
-def send_text(
-    caption
-):
-
+def send_message(text):
     return telegram_request(
         "sendMessage",
         {
             "chat_id": CHANNEL,
-            "text": caption,
-        }
+            "text": text,
+            "disable_web_page_preview": "true",
+        },
     )
 
 
-# ============================================================
-# MAIN
-# ============================================================
+def send_photo(image_url, caption):
+    return telegram_request(
+        "sendPhoto",
+        {
+            "chat_id": CHANNEL,
+            "photo": image_url,
+            "caption": caption,
+        },
+    )
+
+
+def make_post(article):
+    title = clean_title(
+        article["title"]
+    )
+
+    summary = shorten(
+        article.get("summary", ""),
+        360
+    )
+
+    if not summary:
+        summary = (
+            "A new official update has been announced "
+            "for this anime."
+        )
+
+    return (
+        f"🎬 {title}\n\n"
+        f"{summary}"
+    )
+
 
 def main():
 
-    print(
-        "Starting Anime News Bot..."
+    if not BOT_TOKEN:
+        print("ERROR: BOT_TOKEN is missing.")
+        return
+
+    print("Starting anime news bot...")
+
+    all_articles = []
+
+    for feed in FEEDS:
+
+        print(
+            f"Checking {feed['name']}..."
+        )
+
+        data = http_get(
+            feed["url"]
+        )
+
+        if not data:
+            print(
+                f"Could not fetch {feed['name']}"
+            )
+            continue
+
+        articles = parse_feed(
+            data,
+            feed["name"],
+            feed["weight"],
+        )
+
+        print(
+            f"Found {len(articles)} articles "
+            f"from {feed['name']}"
+        )
+
+        all_articles.extend(
+            articles
+        )
+
+    if not all_articles:
+        print("No articles found.")
+        return
+
+    unique = {}
+
+    for article in all_articles:
+
+        key = article.get(
+            "url",
+            ""
+        ).strip()
+
+        if not key:
+            continue
+
+        if key not in unique:
+            unique[key] = article
+
+        elif (
+            article.get("weight", 0)
+            > unique[key].get("weight", 0)
+        ):
+            unique[key] = article
+
+    all_articles = list(
+        unique.values()
     )
 
+    print(
+        f"{len(all_articles)} unique articles."
+    )
 
     posted = load_posted()
 
     candidates = []
 
-    seen_urls = set()
+    for article in all_articles:
 
-
-    # ========================================================
-    # READ FEEDS
-    # ========================================================
-
-    for feed_url in FEEDS:
-
-        print(
-            "Checking:",
-            feed_url
+        title = article.get(
+            "title",
+            ""
         )
 
+        summary = article.get(
+            "summary",
+            ""
+        )
 
-        try:
-
-            xml_data = get_feed(
-                feed_url
-            )
-
-            articles = parse_feed(
-                xml_data
-            )
-
-            print(
-                "Found:",
-                len(articles)
-            )
-
-
-        except Exception as e:
-
-            print(
-                "Feed error:",
-                e
-            )
-
+        if not title:
             continue
 
+        if not article_is_fresh(
+            article.get("date", "")
+        ):
+            continue
 
-        # ====================================================
-        # FILTER
-        # ====================================================
+        if not is_good_anime_news(
+            title,
+            summary
+        ):
+            continue
 
-        for article in articles:
+        if is_duplicate(
+            article,
+            posted
+        ):
+            continue
 
-            article["link"] = normalize_url(
-                article["link"]
+        article["_score"] = article_score(
+            article
+        )
+
+        candidates.append(
+            article
+        )
+
+    print(
+        f"{len(candidates)} good new articles."
+    )
+
+    if not candidates:
+        print(
+            "Nothing worth posting right now."
+        )
+        return
+
+    candidates.sort(
+        key=lambda article: article["_score"],
+        reverse=True
+    )
+
+    posted_this_run = 0
+
+    for article in candidates:
+
+        if posted_this_run >= MAX_POSTS_PER_RUN:
+            break
+
+        title = clean_title(
+            article["title"]
+        )
+
+        post_text = make_post(
+            article
+        )
+
+        print(
+            f"Trying to post: {title}"
+        )
+
+        image_url = get_article_image(
+            article
+        )
+
+        result = None
+
+        if image_url:
+
+            result = send_photo(
+                image_url,
+                post_text
             )
 
-
-            if not article["link"]:
-                continue
-
-
-            # Same URL in this run
-            if article["link"] in seen_urls:
-                continue
-
-
-            seen_urls.add(
-                article["link"]
-            )
-
-
-            # Already posted
-            if is_duplicate(
-                article,
-                posted
+            if (
+                not result
+                or not result.get("ok")
             ):
-                continue
-           
+                result = send_message(
+                    post_text
+                )
+
+        else:
+
+            result = send_message(
+                post_text
+            )
+
+        if (
+            result
+            and result.get("ok")
+        ):
+
+            print(
+                f"POSTED: {title}"
+            )
+
+            posted.append(
+                {
+                    "id": article_id(article),
+                    "title": title,
+                    "url": article["url"],
+                    "date": article.get(
+                        "date",
+                        ""
+                    ),
+                    "posted_at": datetime.now(
+                        timezone.utc
+                    ).isoformat(),
+                }
+            )
+
+            posted_this_run += 1
+
+            time.sleep(2)
+
+        else:
+
+            print(
+                f"FAILED: {title}"
+            )
+
+    save_posted(
+        posted
+    )
+
+    print(
+        f"Finished. Posted "
+        f"{posted_this_run} article(s)."
+    )
+
+
+if __name__ == "__main__":
+    main()
