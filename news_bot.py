@@ -2,7 +2,6 @@ import os
 import re
 import json
 import html
-import time
 import hashlib
 import urllib.request
 import urllib.parse
@@ -21,10 +20,6 @@ CHANNEL = os.environ.get("CHANNEL", "@ouranime001")
 POSTED_FILE = "posted.json"
 
 MAX_POSTS_PER_RUN = 3
-
-# How old an article can be and still be considered fresh.
-# The bot runs every 30 minutes, so 6 hours gives some protection
-# against feeds updating late while still keeping the channel fresh.
 MAX_ARTICLE_AGE_HOURS = 6
 
 FEEDS = [
@@ -62,14 +57,21 @@ def http_get(url, timeout=20):
             url,
             headers={
                 "User-Agent": USER_AGENT,
-                "Accept": "application/rss+xml, application/xml, text/xml, text/html, */*",
+                "Accept": (
+                    "application/rss+xml, application/xml, "
+                    "text/xml, text/html, */*"
+                ),
             },
         )
 
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(
+            request,
+            timeout=timeout
+        ) as response:
             return response.read()
 
-    except Exception:
+    except Exception as e:
+        print(f"HTTP error: {e}")
         return None
 
 
@@ -81,7 +83,7 @@ def clean_html(text):
     if not text:
         return ""
 
-    text = html.unescape(text)
+    text = html.unescape(str(text))
 
     text = re.sub(
         r"<script\b[^>]*>.*?</script>",
@@ -97,14 +99,22 @@ def clean_html(text):
         flags=re.IGNORECASE | re.DOTALL,
     )
 
-    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(
+        r"<[^>]+>",
+        " ",
+        text,
+    )
 
-    text = re.sub(r"\s+", " ", text)
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    )
 
     return text.strip()
 
 
-def shorten(text, limit=420):
+def shorten(text, limit=360):
     text = clean_html(text)
 
     if len(text) <= limit:
@@ -121,9 +131,23 @@ def shorten(text, limit=420):
 def normalize_text(text):
     text = clean_html(text).lower()
 
-    text = re.sub(r"https?://\S+", "", text)
-    text = re.sub(r"[^a-z0-9\s]", " ", text)
-    text = re.sub(r"\s+", " ", text)
+    text = re.sub(
+        r"https?://\S+",
+        "",
+        text,
+    )
+
+    text = re.sub(
+        r"[^a-z0-9\s]",
+        " ",
+        text,
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    )
 
     return text.strip()
 
@@ -131,7 +155,6 @@ def normalize_text(text):
 def normalize_title(title):
     text = normalize_text(title)
 
-    # Remove common website prefixes.
     prefixes = [
         "crunchyroll news",
         "anime news network",
@@ -152,7 +175,11 @@ def title_similarity(a, b):
     if not a or not b:
         return 0
 
-    return SequenceMatcher(None, a, b).ratio()
+    return SequenceMatcher(
+        None,
+        a,
+        b
+    ).ratio()
 
 
 # ============================================================
@@ -176,12 +203,19 @@ def parse_date(value):
 
     for fmt in formats:
         try:
-            dt = datetime.strptime(value, fmt)
+            dt = datetime.strptime(
+                value,
+                fmt
+            )
 
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
+                dt = dt.replace(
+                    tzinfo=timezone.utc
+                )
 
-            return dt.astimezone(timezone.utc)
+            return dt.astimezone(
+                timezone.utc
+            )
 
         except Exception:
             pass
@@ -193,8 +227,6 @@ def article_is_fresh(date_value):
     dt = parse_date(date_value)
 
     if not dt:
-        # If the feed does not give a usable date, don't automatically
-        # throw the article away.
         return True
 
     now = datetime.now(timezone.utc)
@@ -204,7 +236,10 @@ def article_is_fresh(date_value):
     if age.total_seconds() < 0:
         return True
 
-    return age.total_seconds() <= MAX_ARTICLE_AGE_HOURS * 3600
+    return (
+        age.total_seconds()
+        <= MAX_ARTICLE_AGE_HOURS * 3600
+    )
 
 
 # ============================================================
@@ -213,13 +248,19 @@ def article_is_fresh(date_value):
 
 def local_name(tag):
     if "}" in tag:
-        return tag.split("}", 1)[1].lower()
+        return tag.split(
+            "}",
+            1
+        )[1].lower()
 
     return tag.lower()
 
 
 def find_child(element, names):
-    names = {name.lower() for name in names}
+    names = {
+        name.lower()
+        for name in names
+    }
 
     for child in list(element):
         if local_name(child.tag) in names:
@@ -229,7 +270,10 @@ def find_child(element, names):
 
 
 def child_text(element, names):
-    child = find_child(element, names)
+    child = find_child(
+        element,
+        names
+    )
 
     if child is None:
         return ""
@@ -238,29 +282,45 @@ def child_text(element, names):
 
 
 def get_link(item):
-    # Normal RSS <link>
-    link = child_text(item, ["link"]).strip()
+
+    link = child_text(
+        item,
+        ["link"]
+    ).strip()
 
     if link:
         return html.unescape(link)
 
-    # Atom-style links
     for child in list(item):
+
         if local_name(child.tag) == "link":
-            href = child.attrib.get("href")
+
+            href = child.attrib.get(
+                "href"
+            )
 
             if href:
-                return html.unescape(href)
+                return html.unescape(
+                    href
+                )
 
     return ""
 
 
 def get_image_from_item(item):
+
     # RSS enclosure
     for child in list(item):
-        name = local_name(child.tag)
 
-        if name in ("enclosure", "content"):
+        name = local_name(
+            child.tag
+        )
+
+        if name in (
+            "enclosure",
+            "content"
+        ):
+
             url = (
                 child.attrib.get("url")
                 or child.attrib.get("href")
@@ -268,20 +328,35 @@ def get_image_from_item(item):
             )
 
             if url:
-                media_type = child.attrib.get("type", "").lower()
+
+                media_type = (
+                    child.attrib.get(
+                        "type",
+                        ""
+                    ).lower()
+                )
 
                 if (
                     "image" in media_type
                     or name == "content"
                     or not media_type
                 ):
-                    return html.unescape(url)
+                    return html.unescape(
+                        url
+                    )
 
-    # media:content / media:thumbnail
+    # media:thumbnail / media:content
     for child in list(item):
-        name = local_name(child.tag)
 
-        if name in ("thumbnail", "content"):
+        name = local_name(
+            child.tag
+        )
+
+        if name in (
+            "thumbnail",
+            "content"
+        ):
+
             url = (
                 child.attrib.get("url")
                 or child.attrib.get("href")
@@ -289,42 +364,72 @@ def get_image_from_item(item):
             )
 
             if url:
-                return html.unescape(url)
+                return html.unescape(
+                    url
+                )
 
     return ""
 
 
-def parse_feed(xml_data, source_name, source_weight):
+def parse_feed(
+    xml_data,
+    source_name,
+    source_weight
+):
+
     if not xml_data:
         return []
 
     try:
-        root = ET.fromstring(xml_data)
-    except Exception:
+        root = ET.fromstring(
+            xml_data
+        )
+
+    except Exception as e:
+        print(
+            f"RSS parse error: {e}"
+        )
         return []
 
     items = []
 
-    # RSS
     for item in root.iter():
-        if local_name(item.tag) not in ("item", "entry"):
+
+        if local_name(item.tag) not in (
+            "item",
+            "entry"
+        ):
             continue
 
-        title = child_text(item, ["title"]).strip()
+        title = child_text(
+            item,
+            ["title"]
+        ).strip()
 
         link = get_link(item)
 
         description = child_text(
             item,
-            ["description", "summary", "content"],
+            [
+                "description",
+                "summary",
+                "content"
+            ]
         ).strip()
 
         pub_date = child_text(
             item,
-            ["pubDate", "published", "updated", "date"],
+            [
+                "pubDate",
+                "published",
+                "updated",
+                "date"
+            ]
         ).strip()
 
-        image = get_image_from_item(item)
+        image = get_image_from_item(
+            item
+        )
 
         if not title or not link:
             continue
@@ -332,7 +437,9 @@ def parse_feed(xml_data, source_name, source_weight):
         items.append(
             {
                 "title": clean_html(title),
-                "summary": clean_html(description),
+                "summary": clean_html(
+                    description
+                ),
                 "url": link,
                 "date": pub_date,
                 "image": image,
@@ -349,10 +456,10 @@ def parse_feed(xml_data, source_name, source_weight):
 # ============================================================
 
 def extract_image_from_html(page):
+
     if not page:
         return ""
 
-    # og:image
     patterns = [
         r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
         r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
@@ -361,6 +468,7 @@ def extract_image_from_html(page):
     ]
 
     for pattern in patterns:
+
         match = re.search(
             pattern,
             page,
@@ -368,15 +476,21 @@ def extract_image_from_html(page):
         )
 
         if match:
-            image_url = html.unescape(match.group(1).strip())
+
+            image_url = html.unescape(
+                match.group(1).strip()
+            )
 
             if image_url.startswith("//"):
-                image_url = "https:" + image_url
+                image_url = (
+                    "https:" + image_url
+                )
 
-            if image_url.startswith("http"):
+            if image_url.startswith(
+                "http"
+            ):
                 return image_url
 
-    # First reasonably sized image.
     images = re.findall(
         r'<img[^>]+src=["\']([^"\']+)["\']',
         page,
@@ -384,12 +498,19 @@ def extract_image_from_html(page):
     )
 
     for image_url in images:
-        image_url = html.unescape(image_url.strip())
+
+        image_url = html.unescape(
+            image_url.strip()
+        )
 
         if image_url.startswith("//"):
-            image_url = "https:" + image_url
+            image_url = (
+                "https:" + image_url
+            )
 
-        if not image_url.startswith("http"):
+        if not image_url.startswith(
+            "http"
+        ):
             continue
 
         lowered = image_url.lower()
@@ -412,20 +533,29 @@ def extract_image_from_html(page):
 
 
 def get_article_image(article):
+
     if article.get("image"):
         return article["image"]
 
-    page = http_get(article["url"])
+    page = http_get(
+        article["url"]
+    )
 
     if not page:
         return ""
 
     try:
-        page_text = page.decode("utf-8", errors="ignore")
+        page_text = page.decode(
+            "utf-8",
+            errors="ignore"
+        )
+
     except Exception:
         return ""
 
-    return extract_image_from_html(page_text)
+    return extract_image_from_html(
+        page_text
+    )
 
 
 # ============================================================
@@ -433,6 +563,7 @@ def get_article_image(article):
 # ============================================================
 
 IMPORTANT_ANIME_PATTERNS = [
+
     # Seasons / cours
     r"\bseason\s+\d+\b",
     r"\bnew\s+season\b",
@@ -486,6 +617,7 @@ IMPORTANT_ANIME_PATTERNS = [
 
 
 BAD_ANIME_PATTERNS = [
+
     # Cast-only stories
     r"\bvoice\s+cast\b",
     r"\bcast\s+revealed\b",
@@ -529,27 +661,43 @@ BAD_ANIME_PATTERNS = [
 ]
 
 
-def is_good_anime_news(title, summary=""):
-    text = f"{title} {summary}".lower()
+def is_good_anime_news(
+    title,
+    summary=""
+):
+
+    text = (
+        f"{title} {summary}"
+    ).lower()
 
     # Reject obvious low-value articles.
     for pattern in BAD_ANIME_PATTERNS:
 
-        if re.search(pattern, text, re.IGNORECASE):
+        if re.search(
+            pattern,
+            text,
+            re.IGNORECASE
+        ):
 
-            # Allow the article if the same article also contains
-            # a genuinely important announcement.
             important = any(
-                re.search(pattern2, text, re.IGNORECASE)
-                for pattern2 in IMPORTANT_ANIME_PATTERNS
+                re.search(
+                    pattern2,
+                    text,
+                    re.IGNORECASE
+                )
+                for pattern2
+                in IMPORTANT_ANIME_PATTERNS
             )
 
             if not important:
                 return False
 
-    # Release/premiere announcement.
     release_signal = any(
-        re.search(pattern, text, re.IGNORECASE)
+        re.search(
+            pattern,
+            text,
+            re.IGNORECASE
+        )
         for pattern in [
             r"\bpremiere\b",
             r"\brelease\s+date\b",
@@ -561,7 +709,11 @@ def is_good_anime_news(title, summary=""):
     )
 
     announcement_signal = any(
-        re.search(pattern, text, re.IGNORECASE)
+        re.search(
+            pattern,
+            text,
+            re.IGNORECASE
+        )
         for pattern in [
             r"\bannounced\b",
             r"\bconfirmed\b",
@@ -571,12 +723,18 @@ def is_good_anime_news(title, summary=""):
         ]
     )
 
-    if release_signal and announcement_signal:
+    if (
+        release_signal
+        and announcement_signal
+    ):
         return True
 
-    # Season/cour announcement.
     season_signal = any(
-        re.search(pattern, text, re.IGNORECASE)
+        re.search(
+            pattern,
+            text,
+            re.IGNORECASE
+        )
         for pattern in [
             r"\bseason\s+\d+\b",
             r"\bnew\s+season\b",
@@ -586,22 +744,29 @@ def is_good_anime_news(title, summary=""):
         ]
     )
 
-    if season_signal and (
-        release_signal or announcement_signal
+    if (
+        season_signal
+        and (
+            release_signal
+            or announcement_signal
+        )
     ):
         return True
 
-    # General important-news score.
     score = sum(
         1
-        for pattern in IMPORTANT_ANIME_PATTERNS
-        if re.search(pattern, text, re.IGNORECASE)
+        for pattern
+        in IMPORTANT_ANIME_PATTERNS
+        if re.search(
+            pattern,
+            text,
+            re.IGNORECASE
+        )
     )
 
     if score >= 2:
         return True
 
-    # Strong official-news language.
     strong_score = sum(
         1
         for pattern in [
@@ -612,10 +777,17 @@ def is_good_anime_news(title, summary=""):
             r"\bunveils?\b",
             r"\bset\s+to\b",
         ]
-        if re.search(pattern, text, re.IGNORECASE)
+        if re.search(
+            pattern,
+            text,
+            re.IGNORECASE
+        )
     )
 
-    if score >= 1 and strong_score >= 2:
+    if (
+        score >= 1
+        and strong_score >= 2
+    ):
         return True
 
     return False
@@ -626,22 +798,38 @@ def is_good_anime_news(title, summary=""):
 # ============================================================
 
 def load_posted():
-    if not os.path.exists(POSTED_FILE):
+
+    if not os.path.exists(
+        POSTED_FILE
+    ):
         return []
 
     try:
+
         with open(
             POSTED_FILE,
             "r",
             encoding="utf-8",
         ) as file:
-            data = json.load(file)
 
-        if isinstance(data, list):
+            data = json.load(
+                file
+            )
+
+        if isinstance(
+            data,
+            list
+        ):
             return data
 
-        if isinstance(data, dict):
-            return data.get("posts", [])
+        if isinstance(
+            data,
+            dict
+        ):
+            return data.get(
+                "posts",
+                []
+            )
 
     except Exception:
         pass
@@ -650,7 +838,7 @@ def load_posted():
 
 
 def save_posted(posts):
-    # Keep the memory from becoming unnecessarily huge.
+
     posts = posts[-1000:]
 
     with open(
@@ -658,6 +846,7 @@ def save_posted(posts):
         "w",
         encoding="utf-8",
     ) as file:
+
         json.dump(
             posts,
             file,
@@ -667,47 +856,98 @@ def save_posted(posts):
 
 
 def article_id(article):
-    url = article.get("url", "").strip()
+
+    url = article.get(
+        "url",
+        ""
+    ).strip()
 
     if url:
+
         return hashlib.sha256(
             url.encode("utf-8")
         ).hexdigest()
 
     return hashlib.sha256(
-        article.get("title", "").encode("utf-8")
+        article.get(
+            "title",
+            ""
+        ).encode("utf-8")
     ).hexdigest()
 
 
-def is_duplicate(article, posted):
-    aid = article_id(article)
+def is_duplicate(
+    article,
+    posted
+):
+
+    aid = article_id(
+        article
+    )
 
     for old in posted:
-        if isinstance(old, dict):
-            if old.get("id") == aid:
+
+        if isinstance(
+            old,
+            dict
+        ):
+
+            if old.get(
+                "id"
+            ) == aid:
                 return True
 
-            old_title = old.get("title", "")
+            old_title = old.get(
+                "title",
+                ""
+            )
 
-            if old_title and title_similarity(
-                article["title"],
+            if (
                 old_title
-            ) >= 0.88:
+                and title_similarity(
+                    article["title"],
+                    old_title
+                ) >= 0.88
+            ):
                 return True
 
-        elif isinstance(old, str):
+        elif isinstance(
+            old,
+            str
+        ):
+
             if old == aid:
                 return True
 
     return False
 
 
-def article_score(article):
-    title = article.get("title", "")
-    summary = article.get("summary", "")
-    text = f"{title} {summary}".lower()
+# ============================================================
+# SCORING
+# ============================================================
 
-    score = article.get("weight", 1) * 2
+def article_score(article):
+
+    title = article.get(
+        "title",
+        ""
+    )
+
+    summary = article.get(
+        "summary",
+        ""
+    )
+
+    text = (
+        f"{title} {summary}"
+    ).lower()
+
+    score = (
+        article.get(
+            "weight",
+            1
+        ) * 2
+    )
 
     important_patterns = [
         r"\bseason\s+\d+\b",
@@ -721,7 +961,12 @@ def article_score(article):
     ]
 
     for pattern in important_patterns:
-        if re.search(pattern, text, re.IGNORECASE):
+
+        if re.search(
+            pattern,
+            text,
+            re.IGNORECASE
+        ):
             score += 5
 
     strong_patterns = [
@@ -733,31 +978,55 @@ def article_score(article):
     ]
 
     for pattern in strong_patterns:
-        if re.search(pattern, text, re.IGNORECASE):
+
+        if re.search(
+            pattern,
+            text,
+            re.IGNORECASE
+        ):
             score += 2
 
-    dt = parse_date(article.get("date", ""))
+    dt = parse_date(
+        article.get(
+            "date",
+            ""
+        )
+    )
 
     if dt:
+
         age_hours = (
-            datetime.now(timezone.utc) - dt
+            datetime.now(
+                timezone.utc
+            ) - dt
         ).total_seconds() / 3600
 
         if age_hours <= 2:
             score += 5
+
         elif age_hours <= 4:
             score += 3
+
         elif age_hours <= 6:
             score += 1
 
     return score
 
 
+# ============================================================
+# TITLE CLEANING
+# ============================================================
+
 def clean_title(title):
-    title = clean_html(title)
+
+    title = clean_html(
+        title
+    )
 
     title = re.sub(
-        r"\s*[-|–—]\s*(Crunchyroll|Anime News Network|Otaku News)\s*$",
+        r"\s*[-|–—]\s*"
+        r"(Crunchyroll|Anime News Network|Otaku News)"
+        r"\s*$",
         "",
         title,
         flags=re.IGNORECASE,
@@ -766,7 +1035,151 @@ def clean_title(title):
     return title.strip()
 
 
-def telegram_request(method, payload):
+# ============================================================
+# NEWS CATEGORY
+# ============================================================
+
+def get_category(article):
+
+    text = (
+        f"{article.get('title', '')} "
+        f"{article.get('summary', '')}"
+    ).lower()
+
+    if any(
+        re.search(
+            pattern,
+            text,
+            re.IGNORECASE
+        )
+        for pattern in [
+            r"\bseason\s+\d+\b",
+            r"\bnew\s+season\b",
+            r"\bsecond\s+cour\b",
+            r"\bthird\s+cour\b",
+        ]
+    ):
+        return "NEW SEASON"
+
+    if any(
+        re.search(
+            pattern,
+            text,
+            re.IGNORECASE
+        )
+        for pattern in [
+            r"\bpremiere\b",
+            r"\brelease\s+date\b",
+            r"\breleases?\s+on\b",
+            r"\bdebut\b",
+            r"\bstarts?\s+on\b",
+        ]
+    ):
+        return "RELEASE UPDATE"
+
+    if any(
+        re.search(
+            pattern,
+            text,
+            re.IGNORECASE
+        )
+        for pattern in [
+            r"\bnew\s+trailer\b",
+            r"\btrailer\s+reveals?\b",
+            r"\btrailer\s+unveils?\b",
+            r"\bkey\s+visual\b",
+            r"\bmain\s+visual\b",
+        ]
+    ):
+        return "TRAILER / VISUAL"
+
+    if any(
+        re.search(
+            pattern,
+            text,
+            re.IGNORECASE
+        )
+        for pattern in [
+            r"\bdelayed\b",
+            r"\bpostponed\b",
+            r"\brescheduled\b",
+            r"\bnew\s+release\s+date\b",
+        ]
+    ):
+        return "RELEASE CHANGE"
+
+    if any(
+        re.search(
+            pattern,
+            text,
+            re.IGNORECASE
+        )
+        for pattern in [
+            r"\banime\s+adaptation\b",
+            r"\banime\s+announced\b",
+            r"\bproduction\s+announced\b",
+            r"\bproduction\s+confirmed\b",
+        ]
+    ):
+        return "NEW ANIME"
+
+    if any(
+        re.search(
+            pattern,
+            text,
+            re.IGNORECASE
+        )
+        for pattern in [
+            r"\bstream(?:ing)?\s+on\b",
+            r"\bnow\s+streaming\b",
+            r"\bstreaming\s+date\b",
+        ]
+    ):
+        return "STREAMING UPDATE"
+
+    return "ANIME UPDATE"
+
+
+# ============================================================
+# DATE EXTRACTION
+# ============================================================
+
+def extract_important_date(article):
+
+    text = clean_html(
+        f"{article.get('title', '')} "
+        f"{article.get('summary', '')}"
+    )
+
+    patterns = [
+        r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b",
+        r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}\b",
+        r"\b\d{1,2}/\d{1,2}/\d{4}\b",
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            text,
+            re.IGNORECASE
+        )
+
+        if match:
+            return match.group(0)
+
+    return ""
+
+
+# ============================================================
+# TELEGRAM API
+# ============================================================
+
+def telegram_request(
+    method,
+    payload
+):
+
     if not BOT_TOKEN:
         return None
 
@@ -780,6 +1193,7 @@ def telegram_request(method, payload):
     ).encode("utf-8")
 
     try:
+
         request = urllib.request.Request(
             url,
             data=data,
@@ -798,70 +1212,231 @@ def telegram_request(method, payload):
                 errors="ignore"
             )
 
-            return json.loads(raw)
+            result = json.loads(
+                raw
+            )
 
-    except Exception:
+            if not result.get(
+                "ok",
+                False
+            ):
+                print(
+                    f"Telegram error: "
+                    f"{result}"
+                )
+
+            return result
+
+    except Exception as e:
+
+        print(
+            f"Telegram request error: {e}"
+        )
+
         return None
 
 
+# ============================================================
+# POST DESIGN
+# ============================================================
+
+def make_post(article):
+
+    title = clean_title(
+        article["title"]
+    )
+
+    summary = shorten(
+        article.get(
+            "summary",
+            ""
+        ),
+        360
+    )
+
+    if not summary:
+
+        summary = (
+            "A new official update "
+            "has been announced "
+            "for this anime."
+        )
+
+    category = get_category(
+        article
+    )
+
+    important_date = (
+        extract_important_date(
+            article
+        )
+    )
+
+    safe_title = html.escape(
+        title
+    )
+
+    safe_summary = html.escape(
+        summary
+    )
+
+    safe_category = html.escape(
+        category
+    )
+
+    caption = (
+        "<b>🎬 OUR ANIME</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"<b>✨ {safe_category}</b>\n\n"
+        f"<b>{safe_title}</b>\n\n"
+    )
+
+    if important_date:
+
+        safe_date = html.escape(
+            important_date
+        )
+
+        caption += (
+            f"📅 <b>{safe_date}</b>\n\n"
+        )
+
+    caption += (
+        f"{safe_summary}\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "<b>🔥 OUR ANIME • NEWS</b>"
+    )
+
+    if len(caption) > 1000:
+
+        caption = (
+            caption[:997]
+            + "..."
+        )
+
+    return caption
+
+
+# ============================================================
+# SEND POST
+# ============================================================
+
 def send_message(text):
+
     return telegram_request(
         "sendMessage",
         {
             "chat_id": CHANNEL,
             "text": text,
+            "parse_mode": "HTML",
             "disable_web_page_preview": "true",
         },
     )
 
 
-def send_photo(image_url, caption):
+def send_photo(
+    image_url,
+    caption
+):
+
     return telegram_request(
         "sendPhoto",
         {
             "chat_id": CHANNEL,
             "photo": image_url,
             "caption": caption,
+            "parse_mode": "HTML",
         },
     )
 
 
-def make_post(article):
-    title = clean_title(
-        article["title"]
+def publish_article(article):
+
+    caption = make_post(
+        article
     )
 
-    summary = shorten(
-        article.get("summary", ""),
-        360
+    image_url = get_article_image(
+        article
     )
 
-    if not summary:
-        summary = (
-            "A new official update has been announced "
-            "for this anime."
+    if image_url:
+
+        print(
+            "Trying image post..."
         )
 
-    return (
-        f"🎬 {title}\n\n"
-        f"{summary}"
+        result = send_photo(
+            image_url,
+            caption
+        )
+
+        if (
+            result
+            and result.get("ok")
+        ):
+            print(
+                "Image post successful."
+            )
+            return True
+
+        print(
+            "Image post failed. "
+            "Falling back to text."
+        )
+
+    result = send_message(
+        caption
     )
 
+    if (
+        result
+        and result.get("ok")
+    ):
+        print(
+            "Text post successful."
+        )
+        return True
+
+    print(
+        "Text post failed."
+    )
+
+    return False
+
+
+# ============================================================
+# MAIN
+# ============================================================
 
 def main():
 
     if not BOT_TOKEN:
-        print("ERROR: BOT_TOKEN is missing.")
+
+        print(
+            "ERROR: BOT_TOKEN is missing."
+        )
+
         return
 
-    print("Starting anime news bot...")
+    print(
+        "======================================"
+    )
+
+    print(
+        "        OUR ANIME NEWS BOT"
+    )
+
+    print(
+        "======================================"
+    )
 
     all_articles = []
 
     for feed in FEEDS:
 
         print(
-            f"Checking {feed['name']}..."
+            f"\nChecking {feed['name']}..."
         )
 
         data = http_get(
@@ -869,9 +1444,12 @@ def main():
         )
 
         if not data:
+
             print(
-                f"Could not fetch {feed['name']}"
+                f"Could not fetch "
+                f"{feed['name']}"
             )
+
             continue
 
         articles = parse_feed(
@@ -881,8 +1459,9 @@ def main():
         )
 
         print(
-            f"Found {len(articles)} articles "
-            f"from {feed['name']}"
+            f"Found {len(articles)} "
+            f"articles from "
+            f"{feed['name']}"
         )
 
         all_articles.extend(
@@ -890,7 +1469,11 @@ def main():
         )
 
     if not all_articles:
-        print("No articles found.")
+
+        print(
+            "\nNo articles found."
+        )
+
         return
 
     unique = {}
@@ -906,12 +1489,20 @@ def main():
             continue
 
         if key not in unique:
+
             unique[key] = article
 
         elif (
-            article.get("weight", 0)
-            > unique[key].get("weight", 0)
+            article.get(
+                "weight",
+                0
+            )
+            > unique[key].get(
+                "weight",
+                0
+            )
         ):
+
             unique[key] = article
 
     all_articles = list(
@@ -919,7 +1510,8 @@ def main():
     )
 
     print(
-        f"{len(all_articles)} unique articles."
+        f"\n{len(all_articles)} "
+        f"unique articles."
     )
 
     posted = load_posted()
@@ -933,132 +1525,153 @@ def main():
             ""
         )
 
-        summary = article.get(
-            "summary",
-            ""
-        )
-
         if not title:
             continue
 
         if not article_is_fresh(
-            article.get("date", "")
+            article.get(
+                "date",
+                ""
+            )
         ):
-            continue
 
-        if not is_good_anime_news(
-            title,
-            summary
-        ):
+            print(
+                f"Old article: {title}"
+            )
+
             continue
 
         if is_duplicate(
             article,
             posted
         ):
+
+            print(
+                f"Duplicate: {title}"
+            )
+
             continue
 
-        article["_score"] = article_score(
+        if not is_good_anime_news(
+            article.get(
+                "title",
+                ""
+            ),
+            article.get(
+                "summary",
+                ""
+            ),
+        ):
+
+            print(
+                f"Rejected: {title}"
+            )
+
+            continue
+
+        score = article_score(
             article
         )
+
+        article["score"] = score
 
         candidates.append(
             article
         )
 
+        print(
+            f"Candidate [{score}]: "
+            f"{title}"
+        )
+
+    candidates.sort(
+        key=lambda article: (
+            article.get(
+                "score",
+                0
+            ),
+            parse_date(
+                article.get(
+                    "date",
+                    ""
+                )
+            )
+            or datetime.min.replace(
+                tzinfo=timezone.utc
+            ),
+        ),
+        reverse=True,
+    )
+
     print(
-        f"{len(candidates)} good new articles."
+        f"\nQualified articles: "
+        f"{len(candidates)}"
     )
 
     if not candidates:
+
         print(
-            "Nothing worth posting right now."
+            "No new qualifying "
+            "anime news this run."
         )
+
         return
 
-    candidates.sort(
-        key=lambda article: article["_score"],
-        reverse=True
-    )
-
-    posted_this_run = 0
+    posted_count = 0
 
     for article in candidates:
 
-        if posted_this_run >= MAX_POSTS_PER_RUN:
+        if (
+            posted_count
+            >= MAX_POSTS_PER_RUN
+        ):
             break
 
-        title = clean_title(
-            article["title"]
-        )
-
-        post_text = make_post(
-            article
+        print(
+            "\n--------------------------------------"
         )
 
         print(
-            f"Trying to post: {title}"
+            f"Posting: "
+            f"{article['title']}"
         )
 
-        image_url = get_article_image(
+        success = publish_article(
             article
         )
 
-        result = None
-
-        if image_url:
-
-            result = send_photo(
-                image_url,
-                post_text
-            )
-
-            if (
-                not result
-                or not result.get("ok")
-            ):
-                result = send_message(
-                    post_text
-                )
-
-        else:
-
-            result = send_message(
-                post_text
-            )
-
-        if (
-            result
-            and result.get("ok")
-        ):
-
-            print(
-                f"POSTED: {title}"
-            )
+        if success:
 
             posted.append(
                 {
-                    "id": article_id(article),
-                    "title": title,
-                    "url": article["url"],
-                    "date": article.get(
-                        "date",
+                    "id": article_id(
+                        article
+                    ),
+                    "title": clean_title(
+                        article["title"]
+                    ),
+                    "url": article.get(
+                        "url",
                         ""
                     ),
-                    "posted_at": datetime.now(
-                        timezone.utc
-                    ).isoformat(),
+                    "posted_at": (
+                        datetime.now(
+                            timezone.utc
+                        ).isoformat()
+                    ),
                 }
             )
 
-            posted_this_run += 1
+            posted_count += 1
 
-            time.sleep(2)
+            print(
+                "Posted successfully."
+            )
 
         else:
 
             print(
-                f"FAILED: {title}"
+                "Posting failed."
             )
 
     save_posted(
@@ -1066,8 +1679,16 @@ def main():
     )
 
     print(
-        f"Finished. Posted "
-        f"{posted_this_run} article(s)."
+        "\n======================================"
+    )
+
+    print(
+        f"Posted this run: "
+        f"{posted_count}"
+    )
+
+    print(
+        "======================================"
     )
 
 
