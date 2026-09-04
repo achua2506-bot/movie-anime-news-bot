@@ -838,3 +838,387 @@ def announcement_caption(
         f"available on OTT from "
         f"<b>{release_date.strftime('%d %B %Y')}</b>."
 )
+    def now_caption(
+    title,
+    platform
+):
+    if platform:
+
+        return (
+            "🎬 <b>Now Streaming</b>\n\n"
+            f"<b>{escape_html(title)}</b> is now "
+            f"available on <b>{escape_html(platform)}</b>."
+        )
+
+    return (
+        "🎬 <b>Now Streaming</b>\n\n"
+        f"<b>{escape_html(title)}</b> is now available on OTT."
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    print(
+        "Starting Movie OTT News Bot..."
+    )
+
+    today = datetime.now(
+        IST
+    ).date()
+
+    state = load_state()
+
+    release_posts = 0
+
+    # --------------------------------------------------------
+    # 1. CHECK SAVED FUTURE RELEASES
+    # --------------------------------------------------------
+
+    for key, record in list(
+        state["announcements"].items()
+    ):
+
+        if not isinstance(
+            record,
+            dict
+        ):
+            continue
+
+        if record.get(
+            "released_posted",
+            False
+        ):
+            continue
+
+        try:
+
+            release_date = date.fromisoformat(
+                record["release_date"]
+            )
+
+        except Exception:
+            continue
+
+        if release_date != today:
+            continue
+
+        if release_posts >= MAX_RELEASE_POSTS:
+            break
+
+        title = record.get(
+            "title",
+            ""
+        )
+
+        platform_name = record.get(
+            "platform",
+            ""
+        )
+
+        item = {
+            "title": title,
+            "url": "",
+            "image": record.get(
+                "image",
+                ""
+            )
+        }
+
+        caption = now_caption(
+            title,
+            platform_name
+        )
+
+        if send_item(
+            item,
+            caption
+        ):
+
+            record[
+                "released_posted"
+            ] = True
+
+            release_posts += 1
+
+    # --------------------------------------------------------
+    # 2. READ ALL RSS FEEDS
+    # --------------------------------------------------------
+
+    all_items = []
+
+    for feed in RSS_FEEDS:
+
+        print(
+            "Checking:",
+            feed
+        )
+
+        data = fetch_feed(
+            feed
+        )
+
+        if data:
+            all_items.extend(
+                parse_feed(data)
+            )
+
+    # --------------------------------------------------------
+    # 3. REMOVE SAME URL DUPLICATES
+    # --------------------------------------------------------
+
+    unique_items = []
+
+    seen_urls = set()
+
+    for item in all_items:
+
+        url = item["url"]
+
+        if url in seen_urls:
+            continue
+
+        seen_urls.add(url)
+
+        unique_items.append(
+            item
+        )
+
+    # --------------------------------------------------------
+    # 4. FILTER OTT STORIES
+    # --------------------------------------------------------
+
+    candidates = []
+
+    for item in unique_items:
+
+        if already_posted(
+            state,
+            item
+        ):
+            continue
+
+        full_text = (
+            item["title"]
+            + " "
+            + item["description"]
+        )
+
+        if not has_ott(full_text):
+            continue
+
+        if bad_title(item["title"]):
+            continue
+
+        context = release_context(
+            full_text
+        )
+
+        status = (
+            story_status(context)
+            or story_status(full_text)
+        )
+
+        platform_name = (
+            find_platform(context)
+            or find_platform(full_text)
+        )
+
+        release_date = parse_release_date(
+            context,
+            today
+        )
+
+        if status == "now":
+
+            candidates.append({
+                "score": 30,
+                "type": "now",
+                "item": item,
+                "platform": platform_name,
+                "release_date": None
+            })
+
+        elif (
+            status == "announced"
+            and release_date
+            and release_date >= today
+        ):
+
+            score = 25
+
+            if platform_name:
+                score += 10
+
+            candidates.append({
+                "score": score,
+                "type": "announced",
+                "item": item,
+                "platform": platform_name,
+                "release_date": release_date
+            })
+
+    candidates.sort(
+        key=lambda x: x["score"],
+        reverse=True
+    )
+
+    # --------------------------------------------------------
+    # 5. POST NEW STORIES
+    # --------------------------------------------------------
+
+    new_posts = 0
+
+    for candidate in candidates:
+
+        if new_posts >= MAX_NEW_POSTS:
+            break
+
+        item = candidate["item"]
+
+        duplicate = False
+
+        for old in state["posted"][-50:]:
+
+            if not isinstance(
+                old,
+                dict
+            ):
+                continue
+
+            if similar(
+                item["title"],
+                old.get("title", "")
+            ) >= 0.82:
+
+                duplicate = True
+                break
+
+        if duplicate:
+            continue
+
+        release_date = candidate[
+            "release_date"
+        ]
+
+        if release_date:
+
+            caption = announcement_caption(
+                item["title"],
+                candidate["platform"],
+                release_date
+            )
+
+        else:
+
+            caption = now_caption(
+                item["title"],
+                candidate["platform"]
+            )
+
+        if not send_item(
+            item,
+            caption
+        ):
+            continue
+
+        state["posted"].append({
+            "url": item["url"],
+            "title": item["title"],
+            "posted_at": datetime.now(
+                IST
+            ).isoformat()
+        })
+
+        if release_date:
+
+            state["announcements"][
+                item["url"]
+            ] = {
+                "title": item["title"],
+                "platform": candidate[
+                    "platform"
+                ],
+                "release_date": release_date.isoformat(),
+                "released_posted": False,
+                "image": item.get(
+                    "image",
+                    ""
+                )
+            }
+
+        new_posts += 1
+
+    # --------------------------------------------------------
+    # 6. KEEP MEMORY UNDER CONTROL
+    # --------------------------------------------------------
+
+    state["posted"] = state[
+        "posted"
+    ][-1000:]
+
+    cleaned = {}
+
+    for key, record in state[
+        "announcements"
+    ].items():
+
+        if not isinstance(
+            record,
+            dict
+        ):
+            continue
+
+        try:
+
+            release_date = date.fromisoformat(
+                record["release_date"]
+            )
+
+        except Exception:
+            continue
+
+        if release_date >= today:
+
+            cleaned[key] = record
+
+        elif record.get(
+            "released_posted",
+            False
+        ):
+
+            cleaned[key] = record
+
+    state[
+        "announcements"
+    ] = cleaned
+
+    save_state(
+        state
+    )
+
+    print(
+        "Movie bot finished."
+    )
+
+    print(
+        "Stories checked:",
+        len(unique_items)
+    )
+
+    print(
+        "New posts:",
+        new_posts
+    )
+
+    print(
+        "Release-day posts:",
+        release_posts
+    )
+
+
+if __name__ == "__main__":
+    main()
