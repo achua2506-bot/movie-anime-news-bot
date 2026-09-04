@@ -1,7 +1,7 @@
 import os
 import re
 import json
-import urllib.request
+import urllib.error
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -99,7 +99,7 @@ def save_posted(posted):
     DATA_FILE.write_text(json.dumps(list(posted)[-500:]))
 
 
-def send_telegram(text):
+.def send_telegram(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
     payload = json.dumps({
@@ -114,7 +114,30 @@ def send_telegram(text):
         headers={"Content-Type": "application/json"}
     )
 
-    urllib.request.urlopen(req, timeout=20)
+    try:
+        urllib.request.urlopen(req, timeout=20)
+        time.sleep(3)
+
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            retry_after = 10
+
+            try:
+                data = json.loads(e.read().decode())
+                retry_after = data.get("parameters", {}).get(
+                    "retry_after", 10
+                )
+            except Exception:
+                pass
+
+            print(f"Telegram rate limit. Waiting {retry_after} seconds...")
+            time.sleep(retry_after)
+
+            urllib.request.urlopen(req, timeout=20)
+            time.sleep(3)
+
+        else:
+            raise
 
 
 def main():
@@ -126,7 +149,7 @@ def main():
             if relevant(item):
                 candidates.append(item)
 
-    for item in candidates:
+    for item in candidates[:5]:
         if item["link"] in posted:
             continue
 
